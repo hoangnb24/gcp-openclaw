@@ -1,19 +1,16 @@
-# Backup and Restore Runbook
+# Backup And Restore Runbook
 
-This runbook provides the day-1 protection baseline for persistent OpenClaw instances.
-It follows `D7`: persistent disks plus snapshot/backup steps, without building a full backup platform in phase one.
+This repository uses two complementary protection layers for persistent OpenClaw instances on GCP:
 
-## Protection Layers
+1. recurring disk snapshots through a resource policy
+2. ad-hoc machine images for rollback points and persistent clone sources
 
-1. Recurring disk snapshots via a snapshot schedule resource policy.
-2. Ad-hoc machine images before major changes (upgrade checkpoints and clone sources).
+Use recurring snapshots for routine recovery points.
+Use machine images before upgrades, risky maintenance, or when you want a long-lived full-environment clone source.
 
-Use recurring snapshots for regular recovery points.
-Use machine images as milestone-grade checkpoints before risky operations.
+## Snapshot Schedule
 
-## Recurring Snapshot Schedule
-
-Create a daily snapshot schedule policy:
+Create the standard daily policy:
 
 ```bash
 bash scripts/openclaw-gcp/create-snapshot-policy.sh \
@@ -24,12 +21,7 @@ bash scripts/openclaw-gcp/create-snapshot-policy.sh \
   --max-retention-days 14
 ```
 
-Rerun behavior:
-
-- Re-running `create-snapshot-policy.sh` reuses the existing policy when it is already present.
-- You can safely rerun it later with `--target-disk` to attach that policy to additional disks.
-
-Attach the policy to an existing disk:
+Attach the policy to a disk in the same run or later:
 
 ```bash
 bash scripts/openclaw-gcp/create-snapshot-policy.sh \
@@ -40,16 +32,42 @@ bash scripts/openclaw-gcp/create-snapshot-policy.sh \
   --target-disk-zone asia-southeast1-a
 ```
 
-Region override note:
-When you change `--region`, the script derives a matching `-a` zone for disk attachment unless you explicitly pass `--zone` or `--target-disk-zone`.
+Supported snapshot policy options:
 
-UTC caveat:
-Snapshot schedules are defined in UTC windows and begin within the selected hour, not at an exact minute.
-Pick hours with this window behavior in mind.
+- `--policy-name`
+- `--region`
+- `--zone`
+- `--start-hour-utc`
+- `--max-retention-days`
+- `--on-source-disk-delete`
+- `--target-disk`
+- `--target-disk-zone`
+- `--dry-run`
 
-## Ad-Hoc Machine Image Before Major Upgrades
+Operational notes:
 
-Before major OpenClaw or OS upgrades, capture a machine image with the repo script:
+- valid `--on-source-disk-delete` values are `KEEP_AUTO_SNAPSHOTS` and `APPLY_RETENTION_POLICY`
+- policy creation uses create-if-missing semantics
+- reruns reuse an existing policy cleanly
+- when `--region` changes and `--zone` is not passed, the script derives `<region>-a`
+- `--target-disk-zone` defaults to the effective `--zone` value
+- schedule windows are defined in UTC and begin within the selected hour, not at an exact minute
+
+Example with retention-policy cleanup on source-disk deletion:
+
+```bash
+bash scripts/openclaw-gcp/create-snapshot-policy.sh \
+  --project-id hoangnb-openclaw \
+  --policy-name oc-daily-snapshots \
+  --region asia-southeast1 \
+  --start-hour-utc 18 \
+  --max-retention-days 14 \
+  --on-source-disk-delete APPLY_RETENTION_POLICY
+```
+
+## Machine Images
+
+Create a machine image from a known-good VM:
 
 ```bash
 bash scripts/openclaw-gcp/create-machine-image.sh \
@@ -60,9 +78,77 @@ bash scripts/openclaw-gcp/create-machine-image.sh \
   --storage-location asia-southeast1
 ```
 
-Use this checkpoint for rollback or to seed a persistent clone.
+Supported machine-image options:
 
-## Restore from Snapshot (Boot Disk Recovery)
+- `--source-instance`
+- `--source-zone`
+- `--image-name`
+- `--image-family`
+- `--description`
+- `--storage-location`
+- `--dry-run`
+
+Operational notes:
+
+- `--image-name` defaults to `oc-image-<utc-timestamp>`
+- `--image-family` stores an `openclaw-family=<value>` label for grouping
+- capture the image only after sensitive runtime credentials have been scrubbed or rotated
+
+Example with an image-family label and description:
+
+```bash
+bash scripts/openclaw-gcp/create-machine-image.sh \
+  --project-id hoangnb-openclaw \
+  --source-instance oc-main \
+  --source-zone asia-southeast1-a \
+  --image-family stable \
+  --description "Rollback point before OpenClaw upgrade"
+```
+
+## Clone Creation
+
+Create a persistent clone from a machine image:
+
+```bash
+bash scripts/openclaw-gcp/spawn-from-image.sh \
+  --project-id hoangnb-openclaw \
+  --instance-name oc-main-recovery \
+  --machine-image oc-main-pre-upgrade-YYYYMMDD-HHMM \
+  --zone asia-southeast1-a
+```
+
+Supported clone options:
+
+- `--machine-image`
+- `--zone`
+- `--machine-type`
+- `--subnet`
+- `--service-account`
+- `--scopes`
+- `--dry-run`
+
+Example with explicit placement and identity:
+
+```bash
+bash scripts/openclaw-gcp/spawn-from-image.sh \
+  --project-id hoangnb-openclaw \
+  --instance-name oc-clone-a \
+  --machine-image oc-image-20260324-001 \
+  --zone us-central1-a \
+  --machine-type e2-standard-4 \
+  --subnet default \
+  --service-account my-vm@hoangnb-openclaw.iam.gserviceaccount.com \
+  --scopes https://www.googleapis.com/auth/cloud-platform
+```
+
+Security notes:
+
+- do not assume provider credentials inherited from a machine image are appropriate for the new instance
+- re-auth or reinject credentials intentionally after clone creation
+
+## Restore From Snapshot
+
+### Boot disk recovery
 
 1. Identify the snapshot to restore:
 
@@ -72,7 +158,7 @@ gcloud compute snapshots list \
   --filter='name~oc-daily-snapshots'
 ```
 
-2. Create a replacement disk from snapshot:
+2. Create a replacement disk from that snapshot:
 
 ```bash
 gcloud compute disks create oc-main-restored-boot \
@@ -82,7 +168,7 @@ gcloud compute disks create oc-main-restored-boot \
   --type pd-balanced
 ```
 
-3. Stop the instance and swap boot disk:
+3. Stop the instance and swap the boot disk:
 
 ```bash
 gcloud compute instances stop oc-main \
@@ -105,9 +191,9 @@ gcloud compute instances start oc-main \
   --zone asia-southeast1-a
 ```
 
-## Restore by Spawning from Machine Image
+## Restore From Machine Image
 
-For full-instance rollback or fast replacement, spawn from the machine image with the repo script:
+For full-instance rollback or fast replacement, create a fresh instance from the stored machine image:
 
 ```bash
 bash scripts/openclaw-gcp/spawn-from-image.sh \
@@ -117,10 +203,11 @@ bash scripts/openclaw-gcp/spawn-from-image.sh \
   --zone asia-southeast1-a
 ```
 
-After restore or recovery:
+## Post-Restore Checklist
 
-- Re-auth and inject runtime credentials explicitly.
-- Validate OpenClaw service health and workspace mount state.
-- Re-attach or confirm snapshot policy on the active boot disk.
-- Run `openclaw-docker-setup` on the restored VM if you need to restage the local baseline.
-- Use `openclaw status` and `curl -fsS http://127.0.0.1:18789/healthz` to confirm the gateway is healthy.
+- re-auth providers intentionally
+- reinject runtime credentials intentionally
+- validate `openclaw status`
+- validate `curl -fsS http://127.0.0.1:18789/healthz`
+- reattach or confirm the snapshot policy on the active boot disk
+- rerun `openclaw-docker-setup` if the restored VM needs the host baseline refreshed

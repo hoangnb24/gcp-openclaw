@@ -1,163 +1,108 @@
-# OpenClaw on GCP
+# OpenClaw On GCP
 
-This repo provides a scripted, repeatable way to run OpenClaw on Google Cloud.
-The current operator baseline is validated against project `hoangnb-openclaw` in region `asia-southeast1`.
+This repository provides a repeatable operator workflow for running OpenClaw on Google Cloud with deterministic template creation, Docker-based host wrappers, internal-only networking, Cloud NAT for egress, and IAP for operator access.
 
-This document is the day-1 operator runbook for:
+The deployment model centers on a regional instance template plus a small set of maintenance scripts:
 
-- creating a deterministic baseline VM
-- reaching an internal-only VM through IAP
-- bootstrapping Docker and OpenClaw without manual drift
-- recovering a partially configured VM with a repair script
-- capturing backups and long-lived clones
+- deterministic template creation
+- VM creation from a regional template
+- automatic Cloud NAT handling for internal-only templates
+- host bootstrap and repair through embedded startup metadata
+- recurring disk snapshots
+- machine-image capture and clone workflows
 
-It is aligned with the locked decisions in [CONTEXT.md](../../history/openclaw-gcp-instance-strategy/CONTEXT.md) and the approved implementation approach in [approach.md](../../history/openclaw-gcp-instance-strategy/approach.md).
+Reference planning materials live in:
+
+- [CONTEXT.md](../../history/openclaw-gcp-instance-strategy/CONTEXT.md)
+- [discovery.md](../../history/openclaw-gcp-instance-strategy/discovery.md)
+- [approach.md](../../history/openclaw-gcp-instance-strategy/approach.md)
 
 ## Scope
 
-This repo is responsible for VM provisioning and operator runbooks.
-It does not commit provider secrets, `.env` files, or OpenClaw application data.
+This repository covers VM provisioning, bootstrap, repair, backup, and clone runbooks.
+It does not store provider secrets, `.env` files, or OpenClaw application data.
 
-## Tested Baseline
+## Baseline Defaults
 
-- Project: `hoangnb-openclaw`
-- Region: `asia-southeast1`
-- Zone: `asia-southeast1-a`
-- Machine type: `e2-standard-2`
-- Disk: `pd-balanced`, `30 GiB`
-- OS: Debian 12
-- OpenClaw image: `ghcr.io/openclaw/openclaw:2026.3.23`
-- Networking: internal-only VM with Cloud NAT for egress and IAP for operator access
-
-This is the recommended default for a personal, always-on OpenClaw instance with moderate daily usage.
-
-## Sizing Guidance
-
-- `e2-micro` is not suitable.
-- `e2-small` is an emergency minimum, not a good steady-state choice.
-- `e2-medium` is acceptable for lighter workloads or short-term cost pressure.
-- `e2-standard-2` is the default and the currently validated profile.
-- Move to `e2-standard-4` when CPU or RAM pressure is sustained.
+- Project example: `hoangnb-openclaw`
+- Region default: `asia-southeast1`
+- Zone default: `asia-southeast1-a`
+- Machine type default: `e2-standard-2`
+- Disk default: `pd-balanced`, `30 GiB`
+- OS default: Debian 12
+- Template networking default: supports both external-IP and internal-only paths
+- Recommended networking posture: internal-only VM with Cloud NAT for egress and IAP for SSH
 
 ## Why This Flow Exists
 
-The scripts in `scripts/openclaw-gcp/` intentionally cover the parts that were painful to do manually:
+The scripts in `scripts/openclaw-gcp/` cover the operational steps that are easy to drift when done manually:
 
-- deterministic Debian image resolution
-- explicit template identity mode
-- internal-only VM creation
-- automatic Cloud NAT for internal-only templates
-- Docker and Docker Compose installation
+- resolving a concrete Debian image from a family
+- recording the resolved image and bootstrap metadata in `.khuym/runtime/openclaw-gcp/resolved-debian-image.txt`
+- enforcing explicit template identity mode
+- creating internal-only templates with `--no-address`
+- ensuring Cloud NAT for internal-only templates
+- installing Docker plus Docker Compose compatibility
 - staging the OpenClaw repo on the VM
-- a host `openclaw-docker-setup` command for baseline setup
-- a host `openclaw` command that runs the OpenClaw CLI through Docker
-- repair of stale `~/.openclaw` ownership from older container-created state
+- installing host-level `openclaw-docker-setup` and `openclaw` wrappers
+- repairing host and container access to `~/.openclaw`
 
-The goal is that operators do not need to keep re-learning one-off fixes.
+## Script Inventory
 
-## Access Model
-
-This setup assumes:
-
-- no external IP on the VM
-- outbound internet through Cloud NAT
-- inbound operator access through `gcloud compute ssh` with IAP
-
-If your org blocks external IPs, this is the intended path.
-
-## Scripts
-
-Baseline scripts:
+Provisioning and networking:
 
 - `create-template.sh`
 - `create-instance.sh`
 - `create-cloud-nat.sh`
 - `repair-instance-bootstrap.sh`
 
-Backup and clone scripts:
+Backup and clone workflows:
 
 - `create-snapshot-policy.sh`
 - `create-machine-image.sh`
 - `spawn-from-image.sh`
 
-## Key Options
+Every operator script supports `-h` and `--help`.
+Every provisioning and maintenance command supports `--dry-run`.
 
-The most important operator-facing flags are:
-
-- `create-template.sh`
-  - `--no-service-account`
-  - `--service-account ... --scopes ...`
-  - `--no-address`
-  - `--startup-script-file ...`
-  - `--startup-script-url ... --startup-script-sha256 ...`
-  - `--replace-existing`
-  - `--dry-run`
-- `create-instance.sh`
-  - `--no-create-template`
-  - `--replace-template`
-  - `--ensure-cloud-nat`
-  - `--no-ensure-cloud-nat`
-  - `--no-address`
-  - `--dry-run`
-- `create-cloud-nat.sh`
-  - `--network`
-  - `--router-name`
-  - `--nat-name`
-  - `--dry-run`
-- `repair-instance-bootstrap.sh`
-  - `--run-now`
-  - `--no-tunnel-through-iap`
-  - `--dry-run`
-- `create-machine-image.sh`
-  - `--image-family`
-  - `--storage-location`
-  - `--dry-run`
-- `spawn-from-image.sh`
-  - `--machine-type`
-  - `--subnet`
-  - `--service-account`
-  - `--scopes`
-  - `--dry-run`
-- `create-snapshot-policy.sh`
-  - `--target-disk`
-  - `--target-disk-zone`
-  - `--start-hour-utc`
-  - `--max-retention-days`
-  - `--dry-run`
-
-## Prerequisites
-
-Before running the scripts locally:
-
-- install and authenticate `gcloud`
-- select or pass the correct project
-- ensure Compute Engine API is enabled
-- ensure you have permission to create templates, VMs, routers, and NAT
-- ensure IAP TCP forwarding is allowed for your operator account if the VM is internal-only
-
-## Day-1 Baseline
+## Quickstart
 
 ### 1. Create the template
 
-Use an explicit OpenClaw image tag and an explicit identity choice.
+Use an explicit identity mode and pin the OpenClaw tag.
 
 ```bash
 bash scripts/openclaw-gcp/create-template.sh \
   --project-id hoangnb-openclaw \
+  --template-name oc-template \
   --region asia-southeast1 \
   --zone asia-southeast1-a \
-  --openclaw-image ghcr.io/openclaw/openclaw \
   --openclaw-tag 2026.3.23 \
   --no-service-account \
   --no-address
 ```
 
-What this does:
+This flow:
 
-- resolves a concrete Debian 12 image
+- resolves a concrete Debian image
+- records the resolved image, bootstrap source, and identity mode
 - creates a regional instance template
-- embeds the OpenClaw bootstrap startup script
+- embeds the bootstrap script into instance metadata
 - creates an internal-only template when `--no-address` is used
+
+Identity mode is always explicit:
+
+- use `--no-service-account` for instances that do not need GCP API access
+- use `--service-account ... --scopes ...` when the VM needs API access
+
+Template guardrails:
+
+- `--openclaw-tag` is required when creating or replacing a template
+- the sentinel value `pin-me` is rejected
+- `--startup-script-file` and `--startup-script-url` are mutually exclusive
+- `--startup-script-url` requires `--startup-script-sha256`
+- existing templates are reused by default
+- explicit template-shaping flags against a reused template are rejected unless `--replace-existing` is used
 
 ### 2. Create the VM
 
@@ -170,9 +115,32 @@ bash scripts/openclaw-gcp/create-instance.sh \
   --no-create-template
 ```
 
-For an internal-only template, `create-instance.sh` auto-ensures Cloud NAT unless you explicitly disable that behavior.
+For internal-only templates, `create-instance.sh` ensures Cloud NAT automatically unless you pass `--no-ensure-cloud-nat`.
 
-### 3. SSH into the VM
+This script supports three common modes:
+
+- create the template and the VM in one run
+- reuse an existing template with `--no-create-template`
+- rebuild the template first with `--replace-template`
+
+When template creation is enabled, template-shaping options are forwarded through the same interface:
+
+- `--machine-type`, `--disk-type`, `--disk-size-gb`
+- `--image-project`, `--image-family`, `--image-name`
+- `--openclaw-image`, `--openclaw-tag`
+- `--startup-script-file`, `--startup-script-url`, `--startup-script-sha256`
+- `--service-account`, `--scopes`, `--no-service-account`
+- `--no-address`
+
+Cloud NAT overrides:
+
+- `--ensure-cloud-nat`
+- `--no-ensure-cloud-nat`
+- `--network`
+- `--router-name`
+- `--nat-name`
+
+### 3. Reach the VM
 
 ```bash
 gcloud compute ssh \
@@ -181,9 +149,9 @@ gcloud compute ssh \
   oc-main
 ```
 
-If the instance has no external IP, `gcloud` will automatically fall back to IAP tunneling.
+For internal-only instances, `gcloud` uses IAP tunneling.
 
-### 4. Run the baseline setup on the VM
+### 4. Run the host baseline
 
 From the VM shell:
 
@@ -191,24 +159,28 @@ From the VM shell:
 openclaw-docker-setup
 ```
 
-What this does automatically:
+The host wrapper:
 
-- uses a user-writable checkout under `~/openclaw`
-- reconciles `~/.openclaw` so both the host operator and the container user can write it safely
-- writes or reuses the local `.env`
-- pre-seeds required gateway config for local LAN bind
-- starts the gateway in the correct order
-- runs a non-interactive day-1 onboarding pass with `auth-choice=skip`
+- seeds a user-writable checkout under `~/openclaw`
+- reuses `/opt/openclaw/openclaw` as the staged source checkout
+- prepares `~/.openclaw`, `workspace`, `identity`, and session directories
+- writes or reuses `.env`
+- pre-seeds `gateway.mode=local`
+- pre-seeds `gateway.bind`
+- sets `gateway.controlUi.allowedOrigins` when the bind mode is not `loopback`
+- starts `openclaw-gateway`
+- runs `openclaw-cli onboard` in non-interactive mode with gateway token auth
+- reapplies shared permissions to `~/.openclaw` after onboarding
 
-This is the supported default.
+The wrapper uses container ownership plus ACLs for shared runtime state:
 
-If you explicitly want the upstream interactive Docker setup flow instead, run:
+- `~/.openclaw` is created with container UID/GID ownership for runtime-managed files
+- the host operator account receives read/write ACL access
+- default ACLs are applied to directories so future files remain writable to both host and container users
 
-```bash
-openclaw-docker-setup --interactive
-```
+If the operator is in the `docker` group, the wrapper can self-heal the active shell session through `sg docker`.
 
-### 5. Check the installation
+### 5. Verify the installation
 
 From the VM shell:
 
@@ -216,9 +188,7 @@ From the VM shell:
 openclaw status
 ```
 
-You should see a status table with a reachable local gateway.
-
-You can also verify the health endpoint directly:
+You can also verify the gateway directly:
 
 ```bash
 curl -fsS http://127.0.0.1:18789/healthz
@@ -230,61 +200,62 @@ Expected response:
 {"ok":true,"status":"live"}
 ```
 
-For this Docker-based deployment, do not use `openclaw daemon status` as the primary health check.
-That upstream command is aimed at systemd-style daemon installs, while this runbook uses Docker Compose for the gateway.
-The host wrapper handles `openclaw daemon status` with Docker-specific guidance.
+`openclaw daemon status` is supported as a Docker-aware status summary on this host.
+Other `openclaw daemon ...` subcommands are not supported in this deployment model.
 
-## What Gets Installed on the VM
+## Host Commands On The VM
 
-The embedded bootstrap installs:
+### `openclaw-docker-setup`
 
-- Docker
-- Docker Compose support
-- `git`
-- `curl`
-- `ca-certificates`
-- a staged OpenClaw checkout under `/opt/openclaw/openclaw`
-- `openclaw-docker-setup` under `/usr/local/bin`
-- `openclaw` under `/usr/local/bin`
+This is the supported baseline command for the Docker deployment.
 
-It also adds the operator user to the `docker` group and self-heals current sessions through `sg docker` when needed.
+Behavior:
 
-## Repair Flow
+- ensures Docker access for the current user
+- seeds a user checkout under `${OPENCLAW_REPO_DIR:-$HOME/openclaw}`
+- prepares `${OPENCLAW_CONFIG_DIR:-$HOME/.openclaw}`
+- prepares `${OPENCLAW_WORKSPACE_DIR:-$HOME/.openclaw/workspace}`
+- persists gateway configuration in `.env`
+- starts the gateway before CLI onboarding
+- performs non-interactive onboarding with:
+  - `--mode local`
+  - `--no-install-daemon`
+  - `--non-interactive`
+  - `--accept-risk`
+  - `--auth-choice skip`
+  - `--skip-channels`
+  - `--skip-search`
+  - `--skip-skills`
+  - `--skip-ui`
+  - `--gateway-auth token`
 
-Use the repair script when:
-
-- startup script behavior changed in this repo
-- the VM was created before Cloud NAT existed
-- Docker bootstrap partially ran and needs to be reapplied
-- the host wrappers need to be refreshed
-
-Run locally:
+Interactive escape hatch:
 
 ```bash
-bash scripts/openclaw-gcp/repair-instance-bootstrap.sh \
-  --project-id hoangnb-openclaw \
-  --instance-name oc-main \
-  --zone asia-southeast1-a \
-  --openclaw-tag 2026.3.23 \
-  --run-now
+openclaw-docker-setup --interactive
 ```
 
-This updates the VM metadata to the embedded bootstrap in this repo and immediately reruns the startup script over SSH.
+Any arguments after `--interactive` are passed through to the upstream `scripts/docker/setup.sh`.
 
-Use `--no-tunnel-through-iap` only when your SSH path does not require IAP.
+Environment overrides honored by the wrapper:
 
-## Host Commands on the VM
+- `OPENCLAW_REPO_DIR`
+- `OPENCLAW_CONFIG_DIR`
+- `OPENCLAW_WORKSPACE_DIR`
+- `OPENCLAW_GATEWAY_PORT`
+- `OPENCLAW_BRIDGE_PORT`
+- `OPENCLAW_GATEWAY_BIND`
 
-The VM exposes two host-level commands after bootstrap:
+### `openclaw`
 
-- `openclaw-docker-setup`
-  - completes the baseline Docker setup
-  - repairs stale `~/.openclaw` ownership
-  - pre-seeds gateway config
-  - starts the gateway and runs a non-interactive onboard pass
-- `openclaw`
-  - runs the OpenClaw CLI through the Docker deployment
-  - is the preferred entrypoint for day-2 CLI operations
+This wrapper keeps the Docker Compose deployment as the CLI entrypoint on the VM.
+
+Behavior:
+
+- seeds the baseline automatically if the user checkout is missing
+- ensures `openclaw-gateway` is up before each CLI invocation
+- runs the CLI through `docker compose run --no-deps --rm openclaw-cli`
+- intercepts `openclaw daemon status` and returns Docker-specific health guidance
 
 Examples:
 
@@ -296,149 +267,118 @@ openclaw security audit
 openclaw daemon status
 ```
 
-## Internal-Only Networking Notes
+## Command Reference
 
-For the internal-only path:
+### `create-template.sh`
 
-- the VM does not need an external IPv4 address
-- operator access happens through IAP
-- package installs and image pulls rely on Cloud NAT
+Core options:
 
-If a VM was created before Cloud NAT was available, rerun the repair flow above.
-
-If you ever need to create NAT explicitly, use:
-
-```bash
-bash scripts/openclaw-gcp/create-cloud-nat.sh \
-  --project-id hoangnb-openclaw \
-  --region asia-southeast1
-```
-
-## Security Notes
-
-Current baseline rules:
-
-- do not pass provider secrets through template metadata
-- do not store long-lived secrets in this repo
-- inject runtime credentials after boot through operator auth, service account access, or Secret Manager
-- use `--no-service-account` unless the VM truly needs GCP API access
-
-OpenClaw-specific note:
-
-- the current validated baseline uses `gateway.bind=lan`
-- `openclaw status` reports a warning if `gateway.auth.rateLimit` is not configured
-
-That warning is real.
-Before exposing the gateway beyond a trusted boundary, configure auth rate limiting and complete any provider-specific hardening you need.
-
-Recommended next hardening step:
-
-- set `gateway.auth.rateLimit` in `~/.openclaw/openclaw.json`
-- rerun `openclaw status` or `openclaw security audit`
-
-## Provider Auth
-
-The day-1 bootstrap intentionally uses:
-
-- `auth-choice=skip`
-- no channel setup
-- no provider login
-
-That means the baseline gets the gateway and workspace into a healthy state first.
-Provider authentication is a separate step after the VM is healthy.
-
-## Backups
-
-### Snapshot policy
-
-Create a daily snapshot policy:
-
-```bash
-bash scripts/openclaw-gcp/create-snapshot-policy.sh \
-  --project-id hoangnb-openclaw \
-  --policy-name oc-daily-snapshots \
-  --region asia-southeast1 \
-  --start-hour-utc 18 \
-  --max-retention-days 14
-```
-
-Attach it to a disk:
-
-```bash
-bash scripts/openclaw-gcp/create-snapshot-policy.sh \
-  --project-id hoangnb-openclaw \
-  --policy-name oc-daily-snapshots \
-  --region asia-southeast1 \
-  --target-disk oc-main \
-  --target-disk-zone asia-southeast1-a
-```
-
-## Persistent Clones
-
-Use machine images only for long-lived full-environment clones.
-Do not use them as a replacement for deterministic baseline rebuilds.
-
-### Capture a machine image
-
-Before capture:
-
-1. Remove local provider tokens and temporary credentials.
-2. Remove or rotate any user-managed service account keys on disk.
-3. Remove `.env` or secret files that should not be inherited.
-4. Confirm the source VM still boots and runs OpenClaw correctly.
-
-Then capture:
-
-```bash
-bash scripts/openclaw-gcp/create-machine-image.sh \
-  --project-id hoangnb-openclaw \
-  --source-instance oc-main \
-  --source-zone asia-southeast1-a \
-  --image-name oc-image-20260324-001
-```
-
-### Spawn a clone
-
-```bash
-bash scripts/openclaw-gcp/spawn-from-image.sh \
-  --project-id hoangnb-openclaw \
-  --instance-name oc-clone-a \
-  --machine-image oc-image-20260324-001 \
-  --zone us-central1-a
-```
-
-After clone creation:
-
-1. Re-auth providers intentionally.
-2. Reinject credentials intentionally.
-3. Do not assume secrets inherited from the source are still valid or appropriate.
-4. Validate service health before production use.
-
-## Rerun and Drift Behavior
-
-- `create-instance.sh` can create the template on first run and reuse it later.
-- `--replace-template` intentionally rebuilds the template.
-- template-shaping flags against an existing template without `--replace-template` are rejected instead of ignored
-- `repair-instance-bootstrap.sh` is the supported way to refresh existing VMs after bootstrap changes
-
-## Troubleshooting
-
-### `Missing required argument [--no-scopes]`
-
-If you use `--no-service-account`, the scripts pass `--no-scopes` automatically.
-If you still see this, rerun with the scripts in this repo.
-
-### Org policy blocks external IPs
-
-Use:
-
+- `--project-id`
+- `--template-name`
+- `--region`
+- `--zone`
+- `--machine-type`
+- `--disk-type`
+- `--disk-size-gb`
+- `--image-project`
+- `--image-family`
+- `--image-name`
+- `--openclaw-image`
+- `--openclaw-tag`
+- `--startup-script-file`
+- `--startup-script-url`
+- `--startup-script-sha256`
+- `--service-account`
+- `--scopes`
+- `--no-service-account`
 - `--no-address`
-- IAP for SSH
-- Cloud NAT for outbound package and image access
+- `--resolution-record`
+- `--replace-existing`
+- `--dry-run`
 
-### `docker: command not found` or Docker service missing
+Operational notes:
 
-Run the repair flow:
+- `--image-name` overrides family resolution
+- `--no-service-account` implies `--no-scopes` in the generated `gcloud` command
+- the template metadata records `openclaw_image`, `openclaw_tag`, `startup_script_source`, and the resolved Debian image name
+- `--resolution-record` writes the resolved image and bootstrap inputs to disk for later reuse checks
+
+### `create-instance.sh`
+
+Core options:
+
+- `--project-id`
+- `--instance-name`
+- `--template-name`
+- `--region`
+- `--zone`
+- `--machine-type`
+- `--disk-type`
+- `--disk-size-gb`
+- `--image-project`
+- `--image-family`
+- `--image-name`
+- `--openclaw-image`
+- `--openclaw-tag`
+- `--startup-script-file`
+- `--startup-script-url`
+- `--startup-script-sha256`
+- `--service-account`
+- `--scopes`
+- `--no-service-account`
+- `--no-address`
+- `--ensure-cloud-nat`
+- `--no-ensure-cloud-nat`
+- `--network`
+- `--router-name`
+- `--nat-name`
+- `--resolution-record`
+- `--no-create-template`
+- `--replace-template`
+- `--dry-run`
+
+Operational notes:
+
+- the instance is created from `projects/<project>/regions/<region>/instanceTemplates/<template>`
+- with `--no-create-template`, the script inspects the existing template to decide whether Cloud NAT is required
+- with `--replace-template`, the template is recreated before the VM is created
+
+### `create-cloud-nat.sh`
+
+Core options:
+
+- `--project-id`
+- `--region`
+- `--network`
+- `--router-name`
+- `--nat-name`
+- `--dry-run`
+
+Operational notes:
+
+- both the router and NAT are created with create-if-missing semantics
+- reruns reuse existing resources cleanly
+
+### `repair-instance-bootstrap.sh`
+
+Core options:
+
+- `--project-id`
+- `--instance-name`
+- `--zone`
+- `--openclaw-image`
+- `--openclaw-tag`
+- `--run-now`
+- `--no-tunnel-through-iap`
+- `--dry-run`
+
+Operational notes:
+
+- refreshes instance metadata with the embedded bootstrap script from this repository
+- updates `startup_script_source` metadata to the embedded bootstrap version tracked by the repo
+- `--run-now` triggers `sudo google_metadata_script_runner startup` over SSH immediately after the metadata update
+
+Example:
 
 ```bash
 bash scripts/openclaw-gcp/repair-instance-bootstrap.sh \
@@ -449,35 +389,151 @@ bash scripts/openclaw-gcp/repair-instance-bootstrap.sh \
   --run-now
 ```
 
-### `openclaw-docker-setup` says permission denied under `~/.openclaw`
+### `create-snapshot-policy.sh`
 
-The wrapper reapplies shared host/container permissions on `~/.openclaw` automatically.
-If you still hit it, rerun the repair flow so the wrapper on the VM matches this repo.
+Core options:
 
-The failure typically looks like:
+- `--project-id`
+- `--policy-name`
+- `--region`
+- `--zone`
+- `--start-hour-utc`
+- `--max-retention-days`
+- `--on-source-disk-delete`
+- `--target-disk`
+- `--target-disk-zone`
+- `--dry-run`
+
+Operational notes:
+
+- valid `--on-source-disk-delete` values are `KEEP_AUTO_SNAPSHOTS` and `APPLY_RETENTION_POLICY`
+- when `--region` changes and `--zone` is not set, the script derives `<region>-a`
+- a target disk can be attached in the same invocation
+
+### `create-machine-image.sh`
+
+Core options:
+
+- `--project-id`
+- `--source-instance`
+- `--source-zone`
+- `--image-name`
+- `--image-family`
+- `--description`
+- `--storage-location`
+- `--dry-run`
+
+Operational notes:
+
+- `--image-name` defaults to `oc-image-<utc-timestamp>`
+- `--image-family` records an `openclaw-family=<value>` label for grouping and latest-in-family workflows
+
+### `spawn-from-image.sh`
+
+Core options:
+
+- `--project-id`
+- `--instance-name`
+- `--machine-image`
+- `--zone`
+- `--machine-type`
+- `--subnet`
+- `--service-account`
+- `--scopes`
+- `--dry-run`
+
+Operational notes:
+
+- use this flow for persistent clone creation
+- re-auth or reinject credentials intentionally after clone creation
+
+## Internal-Only Networking
+
+For the internal-only path:
+
+- use `--no-address` on template creation
+- use IAP for SSH access
+- use Cloud NAT for package downloads and image pulls
+
+You can create or refresh NAT explicitly with:
+
+```bash
+bash scripts/openclaw-gcp/create-cloud-nat.sh \
+  --project-id hoangnb-openclaw \
+  --region asia-southeast1
+```
+
+## Security Posture
+
+Baseline security rules:
+
+- do not pass provider secrets through template metadata
+- do not commit runtime secrets to this repository
+- inject runtime credentials after boot through operator auth, Secret Manager, or service-account-based access
+- use `--no-service-account` unless the instance needs GCP API access
+
+The baseline onboarding flow intentionally skips provider auth.
+The gateway and workspace come up first, then provider access is configured as a separate operator action.
+
+## Rerun And Drift Behavior
+
+- `create-template.sh` reuses existing templates by default
+- `create-template.sh --replace-existing` recreates the template
+- `create-instance.sh --replace-template` rebuilds the template before creating the VM
+- `repair-instance-bootstrap.sh` is the supported path for refreshing existing VMs when bootstrap behavior changes
+
+## Troubleshooting
+
+### `Missing required argument [--no-scopes]`
+
+`create-template.sh` and `create-instance.sh` pass `--no-scopes` automatically when `--no-service-account` is selected.
+
+### Org policy blocks external IPs
+
+Use:
+
+- `--no-address`
+- IAP for SSH
+- Cloud NAT for outbound package and image access
+
+### `docker: command not found` or Docker service is missing
+
+Refresh the instance bootstrap:
+
+```bash
+bash scripts/openclaw-gcp/repair-instance-bootstrap.sh \
+  --project-id hoangnb-openclaw \
+  --instance-name oc-main \
+  --zone asia-southeast1-a \
+  --openclaw-tag 2026.3.23 \
+  --run-now
+```
+
+### `openclaw-docker-setup` reports permission errors under `~/.openclaw`
+
+The wrapper reconciles shared state by restoring container ownership and reapplying host ACLs for the operator account.
+If the local wrapper is older than the repository version, rerun the repair flow so the VM metadata and installed wrapper match the repository.
+
+Typical failure shape:
 
 - `EACCES: permission denied, open '/home/node/.openclaw/openclaw.json....tmp'`
 
-That means the container user can read the config but cannot create or replace files beside it.
-The repair flow refreshes the wrapper and reconciles the ACLs for both the host login and the container user.
+### `openclaw` is missing on the VM
 
-### `openclaw` says command not found
+The bootstrap installs `/usr/local/bin/openclaw`.
+Rerun the repair flow if it is missing.
 
-The host `openclaw` wrapper is installed by the bootstrap.
-If it is missing, rerun the repair flow.
+### `openclaw daemon status` looks systemd-oriented
 
-### `openclaw daemon status` looks systemd-specific
+This host wrapper intercepts `openclaw daemon status` and translates it into a Docker deployment summary.
+Use `openclaw status` for application-level checks.
 
-That command is intercepted by the host wrapper for this Docker deployment.
-Use it as a Docker health summary only.
-For application-level checks, use `openclaw status`.
+## Recommended Operating Profile
 
-## Current Recommendation
+For the default deployment profile:
 
-For `hoangnb-openclaw` today:
-
-1. keep `asia-southeast1` as the default region
-2. keep `e2-standard-2` as the default size
-3. keep the VM internal-only with IAP + Cloud NAT
-4. use `openclaw-docker-setup` for baseline recovery instead of manual tweaking
-5. use `openclaw status` from the VM shell to confirm health
+1. Use `asia-southeast1`.
+2. Use `e2-standard-2`.
+3. Keep the VM internal-only with IAP plus Cloud NAT.
+4. Use `openclaw-docker-setup` for baseline recovery instead of manual drift.
+5. Use `openclaw status` and `curl -fsS http://127.0.0.1:18789/healthz` for health verification.
