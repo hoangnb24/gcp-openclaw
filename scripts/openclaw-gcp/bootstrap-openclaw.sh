@@ -203,12 +203,11 @@ upsert_env() {
 
 ensure_shared_openclaw_permissions() {
   local host_uid=""
-  local host_gid=""
   local container_uid="1000"
+  local container_gid="1000"
   local -a root_cmd=()
 
   host_uid="$(id -u)"
-  host_gid="$(id -g)"
 
   if [[ "$(id -u)" -eq 0 ]]; then
     root_cmd=()
@@ -217,7 +216,7 @@ ensure_shared_openclaw_permissions() {
   fi
 
   "${root_cmd[@]}" install -d -m 0755 "${OPENCLAW_CONFIG_DIR}" "${OPENCLAW_WORKSPACE_DIR}"
-  "${root_cmd[@]}" chown -R "${host_uid}:${host_gid}" "${OPENCLAW_CONFIG_DIR}"
+  "${root_cmd[@]}" chown -R "${container_uid}:${container_gid}" "${OPENCLAW_CONFIG_DIR}"
   "${root_cmd[@]}" setfacl -R -m "u:${host_uid}:rwX,u:${container_uid}:rwX,m::rwX" "${OPENCLAW_CONFIG_DIR}"
   "${root_cmd[@]}" find "${OPENCLAW_CONFIG_DIR}" -type d -exec setfacl -m "d:u:${host_uid}:rwX,d:u:${container_uid}:rwX,d:m::rwx" {} +
 }

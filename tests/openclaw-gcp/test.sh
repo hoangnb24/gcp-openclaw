@@ -204,6 +204,7 @@ test_create_template_command_and_startup_script() {
   assert_contains "${log_content}" "docker compose up -d openclaw-gateway" "embedded wrapper starts the gateway after pre-seeding config"
   assert_contains "${log_content}" "chown -R \"\${HOST_UID}:\${HOST_GID}\" /host-home/.openclaw" "embedded wrapper repairs host ownership for the operator OpenClaw state directory"
   assert_contains "${log_content}" "root_cmd=(sudo)" "embedded wrapper can elevate to reconcile host ACLs"
+  assert_contains "${log_content}" "\"\${root_cmd[@]}\" chown -R \"\${container_uid}:\${container_gid}\" \"\${OPENCLAW_CONFIG_DIR}\"" "embedded wrapper restores container ownership for runtime-managed OpenClaw state"
   assert_contains "${log_content}" "\"\${root_cmd[@]}\" setfacl -R -m \"u:\${host_uid}:rwX,u:\${container_uid}:rwX,m::rwX\"" "embedded wrapper grants both host and container users access to shared OpenClaw state"
   assert_contains "${log_content}" "\"\${root_cmd[@]}\" find \"\${OPENCLAW_CONFIG_DIR}\" -type d -exec setfacl -m \"d:u:\${host_uid}:rwX,d:u:\${container_uid}:rwX,d:m::rwx\"" "embedded wrapper sets default ACLs for future OpenClaw state files"
   assert_contains "${log_content}" "ensure_shared_openclaw_permissions" "embedded wrapper re-applies shared state permissions after onboarding"
