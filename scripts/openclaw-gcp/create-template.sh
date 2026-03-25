@@ -238,7 +238,7 @@ fi
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 STARTUP_SCRIPT_PATH="${WORK_DIR}/startup-script.sh"
-STARTUP_SCRIPT_SOURCE="embedded-openclaw-bootstrap-v1"
+STARTUP_SCRIPT_SOURCE="embedded-openclaw-bootstrap-v10"
 STARTUP_SCRIPT_DIGEST=""
 
 if [[ -n "${STARTUP_SCRIPT_FILE}" ]]; then

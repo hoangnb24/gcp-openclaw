@@ -184,7 +184,7 @@ test_create_template_command_and_startup_script() {
   assert_contains "${log_content}" "--no-service-account" "create-template passes no-service-account to gcloud"
   assert_contains "${log_content}" "--no-scopes" "create-template disables scopes when no service account is attached"
   assert_contains "${log_content}" "--no-address" "create-template disables external IPv4 when requested"
-  assert_contains "${log_content}" "apt-get install -y docker.io git curl ca-certificates" "embedded startup script installs Docker prerequisites"
+  assert_contains "${log_content}" "apt-get install -y docker.io git curl ca-certificates acl" "embedded startup script installs Docker and ACL prerequisites"
   assert_contains "${log_content}" "apt-get install -y docker-compose-plugin" "embedded startup script attempts Docker Compose plugin install"
   assert_contains "${log_content}" "apt-get install -y docker-compose" "embedded startup script falls back to docker-compose package"
   assert_contains "${log_content}" "docker-cli-plugin-metadata" "embedded startup script installs a metadata-aware compose wrapper"
@@ -203,6 +203,10 @@ test_create_template_command_and_startup_script() {
   assert_contains "${log_content}" "--skip-health" "embedded wrapper skips the insecure non-loopback health probe during local LAN onboarding"
   assert_contains "${log_content}" "docker compose up -d openclaw-gateway" "embedded wrapper starts the gateway after pre-seeding config"
   assert_contains "${log_content}" "chown -R \"\${HOST_UID}:\${HOST_GID}\" /host-home/.openclaw" "embedded wrapper repairs host ownership for the operator OpenClaw state directory"
+  assert_contains "${log_content}" "root_cmd=(sudo)" "embedded wrapper can elevate to reconcile host ACLs"
+  assert_contains "${log_content}" "\"\${root_cmd[@]}\" setfacl -R -m \"u:\${host_uid}:rwX,u:\${container_uid}:rwX,m::rwX\"" "embedded wrapper grants both host and container users access to shared OpenClaw state"
+  assert_contains "${log_content}" "\"\${root_cmd[@]}\" find \"\${OPENCLAW_CONFIG_DIR}\" -type d -exec setfacl -m \"d:u:\${host_uid}:rwX,d:u:\${container_uid}:rwX,d:m::rwx\"" "embedded wrapper sets default ACLs for future OpenClaw state files"
+  assert_contains "${log_content}" "ensure_shared_openclaw_permissions" "embedded wrapper re-applies shared state permissions after onboarding"
   assert_contains "${log_content}" "Provider auth was skipped intentionally for day-1 bootstrap." "embedded wrapper explains the day-1 auth posture"
   assert_contains "${log_content}" "docker compose run --no-deps --rm openclaw-cli \"\$@\"" "embedded CLI wrapper runs the OpenClaw CLI through Docker Compose"
   assert_contains "${log_content}" "if [[ \"\${1:-}\" == \"daemon\" ]]; then" "embedded CLI wrapper special-cases daemon commands for Docker deployments"
@@ -214,6 +218,7 @@ test_create_template_command_and_startup_script() {
   assert_contains "${log_content}" "usermod -aG docker \"\${OPENCLAW_OWNER}\"" "embedded startup script adds the operator user to the docker group"
   assert_contains "${log_content}" "OPENCLAW_HOME=\"/root\"" "embedded startup script falls back to /root"
   assert_not_contains "${log_content}" "/home/root/.openclaw" "embedded startup script no longer writes to /home/root"
+  assert_not_contains "${log_content}" "chown node:node" "embedded wrapper no longer forces host state ownership to the container UID"
 }
 
 test_create_instance_first_run_flow() {
@@ -399,7 +404,7 @@ test_repair_instance_bootstrap_flow() {
   local log_content
   log_content="$(cat "${mock_dir}/gcloud.log")"
   assert_contains "${log_content}" "GCLOUD compute instances add-metadata oc-main --project hoangnb-openclaw --zone asia-southeast1-a" "repair-instance-bootstrap updates instance metadata"
-  assert_contains "${log_content}" "startup_script_source=embedded-openclaw-bootstrap-v9" "repair-instance-bootstrap marks the refreshed bootstrap version"
+  assert_contains "${log_content}" "startup_script_source=embedded-openclaw-bootstrap-v10" "repair-instance-bootstrap marks the refreshed bootstrap version"
   assert_contains "${log_content}" "GCLOUD compute ssh oc-main --project hoangnb-openclaw --zone asia-southeast1-a --tunnel-through-iap --command sudo google_metadata_script_runner startup" "repair-instance-bootstrap reruns startup over IAP by default"
 }
 

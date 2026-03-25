@@ -71,7 +71,7 @@ METADATA_CMD=(
   gcloud compute instances add-metadata "${INSTANCE_NAME}"
   --project "${PROJECT_ID}"
   --zone "${ZONE}"
-  --metadata "openclaw_image=${OPENCLAW_IMAGE},openclaw_tag=${OPENCLAW_TAG},startup_script_source=embedded-openclaw-bootstrap-v9"
+  --metadata "openclaw_image=${OPENCLAW_IMAGE},openclaw_tag=${OPENCLAW_TAG},startup_script_source=embedded-openclaw-bootstrap-v10"
   --metadata-from-file "startup-script=${BOOTSTRAP_SCRIPT}"
 )
 

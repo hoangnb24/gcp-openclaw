@@ -194,7 +194,7 @@ openclaw-docker-setup
 What this does automatically:
 
 - uses a user-writable checkout under `~/openclaw`
-- repairs stale ownership under `~/.openclaw` if an older run left it owned by container UID `1000`
+- reconciles `~/.openclaw` so both the host operator and the container user can write it safely
 - writes or reuses the local `.env`
 - pre-seeds required gateway config for local LAN bind
 - starts the gateway in the correct order
@@ -451,8 +451,15 @@ bash scripts/openclaw-gcp/repair-instance-bootstrap.sh \
 
 ### `openclaw-docker-setup` says permission denied under `~/.openclaw`
 
-That stale ownership case is handled automatically by the wrapper.
+The wrapper reapplies shared host/container permissions on `~/.openclaw` automatically.
 If you still hit it, rerun the repair flow so the wrapper on the VM matches this repo.
+
+The failure typically looks like:
+
+- `EACCES: permission denied, open '/home/node/.openclaw/openclaw.json....tmp'`
+
+That means the container user can read the config but cannot create or replace files beside it.
+The repair flow refreshes the wrapper and reconciles the ACLs for both the host login and the container user.
 
 ### `openclaw` says command not found
 

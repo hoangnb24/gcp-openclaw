@@ -201,6 +201,27 @@ upsert_env() {
   mv "${tmp_path}" "${file_path}"
 }
 
+ensure_shared_openclaw_permissions() {
+  local host_uid=""
+  local host_gid=""
+  local container_uid="1000"
+  local -a root_cmd=()
+
+  host_uid="$(id -u)"
+  host_gid="$(id -g)"
+
+  if [[ "$(id -u)" -eq 0 ]]; then
+    root_cmd=()
+  else
+    root_cmd=(sudo)
+  fi
+
+  "${root_cmd[@]}" install -d -m 0755 "${OPENCLAW_CONFIG_DIR}" "${OPENCLAW_WORKSPACE_DIR}"
+  "${root_cmd[@]}" chown -R "${host_uid}:${host_gid}" "${OPENCLAW_CONFIG_DIR}"
+  "${root_cmd[@]}" setfacl -R -m "u:${host_uid}:rwX,u:${container_uid}:rwX,m::rwX" "${OPENCLAW_CONFIG_DIR}"
+  "${root_cmd[@]}" find "${OPENCLAW_CONFIG_DIR}" -type d -exec setfacl -m "d:u:${host_uid}:rwX,d:u:${container_uid}:rwX,d:m::rwx" {} +
+}
+
 OPENCLAW_IMAGE_VALUE="$(curl -fsH "Metadata-Flavor: Google" \
   "http://metadata.google.internal/computeMetadata/v1/instance/attributes/openclaw_image" || true)"
 OPENCLAW_TAG_VALUE="$(curl -fsH "Metadata-Flavor: Google" \
@@ -254,6 +275,7 @@ OPENCLAW_GATEWAY_TOKEN="$(ensure_gateway_token "${ENV_FILE}")"
 export OPENCLAW_IMAGE OPENCLAW_CONFIG_DIR OPENCLAW_WORKSPACE_DIR OPENCLAW_GATEWAY_PORT OPENCLAW_BRIDGE_PORT OPENCLAW_GATEWAY_BIND OPENCLAW_GATEWAY_TOKEN
 
 ensure_user_openclaw_dirs
+ensure_shared_openclaw_permissions
 
 upsert_env "${ENV_FILE}" \
   "OPENCLAW_CONFIG_DIR=${OPENCLAW_CONFIG_DIR}" \
@@ -264,15 +286,7 @@ upsert_env "${ENV_FILE}" \
   "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" \
   "OPENCLAW_IMAGE=${OPENCLAW_IMAGE}"
 
-echo "==> Fixing data-directory permissions"
-docker run --rm \
-  --user root \
-  -e HOME=/home/node \
-  -v "${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw" \
-  -v "${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace" \
-  --entrypoint sh \
-  "${OPENCLAW_IMAGE}" \
-  -c 'find /home/node/.openclaw -xdev -exec chown node:node {} +; [ -d /home/node/.openclaw/workspace/.openclaw ] && chown -R node:node /home/node/.openclaw/workspace/.openclaw || true'
+echo "==> Reconciling shared state permissions"
 
 echo "==> Pre-seeding gateway config"
 docker run --rm \
@@ -334,6 +348,7 @@ if [[ "${OPENCLAW_GATEWAY_BIND}" != "loopback" ]]; then
 fi
 
 docker compose run --rm openclaw-cli onboard "${ONBOARD_ARGS[@]}"
+ensure_shared_openclaw_permissions
 
 echo "==> Gateway health"
 if curl -fsS "http://127.0.0.1:${OPENCLAW_GATEWAY_PORT}/healthz" >/dev/null 2>&1; then
@@ -423,7 +438,7 @@ install -d -m 0755 /var/log/openclaw
 exec > >(tee -a /var/log/openclaw/bootstrap.log) 2>&1
 
 apt-get update -y
-apt-get install -y docker.io git curl ca-certificates
+apt-get install -y docker.io git curl ca-certificates acl
 ensure_docker_compose
 systemctl enable --now docker
 
