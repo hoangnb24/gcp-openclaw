@@ -1,0 +1,5 @@
+# bv (beads viewer) local config and caches
+.bv/
+
+# Runtime-generated review/provisioning state
+.khuym/runtime/
