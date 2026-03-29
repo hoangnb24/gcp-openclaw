@@ -7,6 +7,7 @@ STARTUP_SCRIPT_SOURCE="embedded-vm-prereqs-v1"
 STARTUP_PROFILE="vm-prereqs-v1"
 STARTUP_CONTRACT_VERSION="startup-ready-v1"
 STARTUP_READY_SENTINEL="/var/lib/openclaw/startup-ready-v1"
+READINESS_LOG_PATH="/var/log/openclaw/readiness-gate.log"
 
 PROJECT_ID=""
 INSTANCE_NAME=""
@@ -75,6 +76,7 @@ METADATA_ENTRIES=(
   "startup_profile=${STARTUP_PROFILE}"
   "startup_contract_version=${STARTUP_CONTRACT_VERSION}"
   "startup_ready_sentinel=${STARTUP_READY_SENTINEL}"
+  "readiness_log_path=${READINESS_LOG_PATH}"
 )
 if [[ -n "${OPENCLAW_IMAGE}" ]]; then
   METADATA_ENTRIES+=("legacy_openclaw_image=${OPENCLAW_IMAGE}")
@@ -112,6 +114,7 @@ echo "  startup_script_source: ${STARTUP_SCRIPT_SOURCE}"
 echo "  startup_profile: ${STARTUP_PROFILE}"
 echo "  startup_contract_version: ${STARTUP_CONTRACT_VERSION}"
 echo "  startup_ready_sentinel: ${STARTUP_READY_SENTINEL}"
+echo "  readiness_log_path: ${READINESS_LOG_PATH}"
 echo "  openclaw_image: ${OPENCLAW_IMAGE}"
 echo "  openclaw_tag: ${OPENCLAW_TAG}"
 echo "  run_now: ${RUN_NOW}"

@@ -78,6 +78,72 @@ if [[ "$*" == *"compute images describe-from-family"* ]]; then
   exit 0
 fi
 
+if [[ "$*" == *"config get-value project"* ]]; then
+  printf '%s\n' "${MOCK_PROJECT_ID:-hoangnb-openclaw}"
+  exit 0
+fi
+
+if [[ "$*" == *"auth list"* && "$*" == *"--filter=status:ACTIVE"* ]]; then
+  printf '%s\n' "${MOCK_ACTIVE_ACCOUNT:-operator@example.com}"
+  exit 0
+fi
+
+if [[ "$*" == *"projects describe"* && "$*" == *"--format=value(projectId)"* ]]; then
+  for ((i=1; i <= $#; i++)); do
+    if [[ "${!i}" == "describe" ]]; then
+      next=$((i + 1))
+      printf '%s\n' "${!next}"
+      exit 0
+    fi
+  done
+  printf '%s\n' "${MOCK_PROJECT_ID:-hoangnb-openclaw}"
+  exit 0
+fi
+
+if [[ "$*" == *"services list"* && "$*" == *"config.name=compute.googleapis.com"* ]]; then
+  printf '%s\n' "compute.googleapis.com"
+  exit 0
+fi
+
+if [[ "$*" == *"services list"* && "$*" == *"config.name=iap.googleapis.com"* ]]; then
+  printf '%s\n' "iap.googleapis.com"
+  exit 0
+fi
+
+if [[ "$*" == *"compute zones describe"* && "$*" == *"--format=value(region.basename())"* ]]; then
+  zone=""
+  for ((i=1; i <= $#; i++)); do
+    if [[ "${!i}" == "describe" ]]; then
+      next=$((i + 1))
+      zone="${!next}"
+      break
+    fi
+  done
+  if [[ -z "${zone}" ]]; then
+    printf '%s\n' "${MOCK_ZONE_REGION:-asia-southeast1}"
+    exit 0
+  fi
+  printf '%s\n' "${zone%-*}"
+  exit 0
+fi
+
+if [[ "$*" == *"compute firewall-rules list"* ]]; then
+  printf '%s\n' "allow-iap-ssh 35.235.240.0/20 tcp:22"
+  exit 0
+fi
+
+if [[ "$*" == *"compute instances list"* && "$*" == *"--format=value(zone.basename())"* ]]; then
+  if [[ -n "${MOCK_INSTANCE_EXISTING_ZONE:-}" ]]; then
+    printf '%s\n' "${MOCK_INSTANCE_EXISTING_ZONE}"
+    exit 0
+  fi
+  if [[ "${MOCK_INSTANCE_EXISTS:-false}" == "true" ]]; then
+    printf '%s\n' "${MOCK_INSTANCE_ZONE:-asia-southeast1-a}"
+    exit 0
+  fi
+  exit 0
+fi
+
 if [[ "$*" == *"compute images describe"* && "$*" == *"--format=value(name)"* ]]; then
   for arg in "$@"; do
     if [[ "${arg}" != --* && "${arg}" != "compute" && "${arg}" != "images" && "${arg}" != "describe" ]]; then
@@ -112,6 +178,39 @@ if [[ "$*" == *"compute instance-templates describe"* ]]; then
     exit 0
   fi
   exit 1
+fi
+
+if [[ "$*" == *"compute instances describe"* && "$*" == *"--format=value(name)"* ]]; then
+  if [[ "${MOCK_INSTANCE_EXISTS:-false}" == "true" ]]; then
+    for ((i=1; i <= $#; i++)); do
+      if [[ "${!i}" == "describe" ]]; then
+        next=$((i + 1))
+        printf '%s\n' "${!next}"
+        exit 0
+      fi
+    done
+    printf '%s\n' "${MOCK_INSTANCE_NAME:-oc-main}"
+    exit 0
+  fi
+  exit 1
+fi
+
+if [[ "$*" == *"compute instances describe"* && "$*" == *"--flatten=metadata.items[]"* && "$*" == *"--filter=metadata.items.key="* ]]; then
+  metadata_key=""
+  for arg in "$@"; do
+    if [[ "${arg}" == --filter=metadata.items.key=* ]]; then
+      metadata_key="${arg#--filter=metadata.items.key=}"
+      break
+    fi
+  done
+  case "${metadata_key}" in
+    startup_script_source) printf '%s\n' "${MOCK_STARTUP_SCRIPT_SOURCE:-embedded-vm-prereqs-v1}" ;;
+    startup_profile) printf '%s\n' "${MOCK_STARTUP_PROFILE:-vm-prereqs-v1}" ;;
+    startup_contract_version) printf '%s\n' "${MOCK_STARTUP_CONTRACT_VERSION:-startup-ready-v1}" ;;
+    startup_ready_sentinel) printf '%s\n' "${MOCK_STARTUP_READY_SENTINEL:-/var/lib/openclaw/startup-ready-v1}" ;;
+    *) printf '%s\n' "" ;;
+  esac
+  exit 0
 fi
 
 if [[ "$*" == *"compute resource-policies describe"* ]]; then
@@ -365,6 +464,24 @@ test_install_help_and_noninteractive_gcloud_guard() {
   assert_not_contains "${RUN_OUTPUT}" "Provisioning instance through template-backed flow..." "install.sh does not reach provisioning after preflight failure"
 }
 
+test_install_readiness_gate_dry_run_contract() {
+  local mock_dir
+  mock_dir="$(new_mock_env install-readiness-dry-run)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" MOCK_INSTANCE_EXISTS=true \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --zone asia-southeast1-a \
+    --dry-run
+
+  assert_status 0 "install.sh dry-run prints readiness gate contract before SSH handoff"
+  assert_contains "${RUN_OUTPUT}" "Readiness gate: probing VM startup contract and host readiness." "install.sh dry-run announces readiness stage"
+  assert_contains "${RUN_OUTPUT}" "Readiness log contract: /var/log/openclaw/readiness-gate.log" "install.sh dry-run prints readiness log path contract"
+  assert_contains "${RUN_OUTPUT}" "Dry-run command (readiness probe):" "install.sh dry-run prints readiness probe command"
+}
+
 test_cloud_nat_idempotent_flow() {
   local mock_dir
   mock_dir="$(new_mock_env cloud-nat)"
@@ -401,6 +518,7 @@ test_repair_instance_bootstrap_flow() {
   assert_contains "${log_content}" "startup_script_source=embedded-vm-prereqs-v1" "repair-instance-bootstrap marks the refreshed startup profile"
   assert_contains "${log_content}" "startup_contract_version=startup-ready-v1" "repair-instance-bootstrap persists startup contract version"
   assert_contains "${log_content}" "startup_ready_sentinel=/var/lib/openclaw/startup-ready-v1" "repair-instance-bootstrap persists readiness sentinel metadata"
+  assert_contains "${log_content}" "readiness_log_path=/var/log/openclaw/readiness-gate.log" "repair-instance-bootstrap persists readiness log path metadata"
   assert_contains "${log_content}" "GCLOUD compute ssh oc-main --project hoangnb-openclaw --zone asia-southeast1-a --tunnel-through-iap --command sudo google_metadata_script_runner startup" "repair-instance-bootstrap reruns startup over IAP by default"
 }
 
@@ -478,6 +596,7 @@ main() {
   test_snapshot_policy_reuse_and_region_default_zone
   test_docs_smoke_commands
   test_install_help_and_noninteractive_gcloud_guard
+  test_install_readiness_gate_dry_run_contract
   test_cloud_nat_idempotent_flow
   test_repair_instance_bootstrap_flow
   test_negative_guards

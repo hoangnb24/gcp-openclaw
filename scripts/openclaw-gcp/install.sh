@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CREATE_INSTANCE_SCRIPT="${SCRIPT_DIR}/create-instance.sh"
+REPAIR_BOOTSTRAP_SCRIPT="${SCRIPT_DIR}/repair-instance-bootstrap.sh"
 
 PROJECT_ID=""
 INSTANCE_NAME="oc-main"
@@ -18,6 +19,13 @@ NO_ADDRESS="true"
 DRY_RUN="false"
 NON_INTERACTIVE_MODE="auto"
 IAP_SSH_SOURCE_RANGE="35.235.240.0/20"
+STARTUP_PROFILE_EXPECTED="vm-prereqs-v1"
+STARTUP_SOURCE_EXPECTED="embedded-vm-prereqs-v1"
+STARTUP_CONTRACT_VERSION_EXPECTED="startup-ready-v1"
+STARTUP_READY_SENTINEL_EXPECTED="/var/lib/openclaw/startup-ready-v1"
+READINESS_LOG_PATH="/var/log/openclaw/readiness-gate.log"
+READINESS_LOG_HINT_LINES="200"
+INSTANCE_REUSED="false"
 
 print_help() {
   cat <<EOF
@@ -63,6 +71,16 @@ fail_preflight() {
   local recovery="$2"
   echo "Preflight failed: ${problem}" >&2
   echo "Recovery: ${recovery}" >&2
+  exit 1
+}
+
+fail_readiness() {
+  local reason="$1"
+  local remedy="$2"
+  echo "Readiness gate failed: ${reason}" >&2
+  echo "Remote readiness log: ${READINESS_LOG_PATH}" >&2
+  echo "Next steps: ${remedy}" >&2
+  echo "Log retrieval hint: gcloud compute ssh ${INSTANCE_NAME} --project ${PROJECT_ID} --zone ${ZONE} --tunnel-through-iap --command \"sudo tail -n ${READINESS_LOG_HINT_LINES} ${READINESS_LOG_PATH}\"" >&2
   exit 1
 }
 
@@ -170,6 +188,13 @@ check_iap_firewall_candidate() {
     "create/update a rule, for example: gcloud compute firewall-rules create allow-iap-ssh --project ${PROJECT_ID} --direction=INGRESS --action=ALLOW --rules=tcp:22 --source-ranges=${IAP_SSH_SOURCE_RANGE} --target-tags=<vm-tag>"
 }
 
+read_instance_zone() {
+  gcloud compute instances list \
+    --project "${PROJECT_ID}" \
+    --filter="name=('${INSTANCE_NAME}')" \
+    --format='value(zone.basename())' 2>/dev/null | head -n1 || true
+}
+
 instance_exists() {
   gcloud compute instances describe "${INSTANCE_NAME}" \
     --project "${PROJECT_ID}" \
@@ -190,26 +215,197 @@ read_instance_metadata_value() {
 check_existing_instance_eligibility() {
   local startup_source
   local startup_profile
+  local startup_contract_version
+  local startup_ready_sentinel
+  local instance_zone
+
+  instance_zone="$(read_instance_zone)"
+  if [[ -n "${instance_zone}" ]] && [[ "${instance_zone}" != "${ZONE}" ]]; then
+    fail_preflight \
+      "instance '${INSTANCE_NAME}' already exists in zone '${instance_zone}', not requested zone '${ZONE}'" \
+      "rerun with --zone ${instance_zone} or choose a different --instance-name"
+  fi
+
   startup_source="$(read_instance_metadata_value startup_script_source)"
   startup_profile="$(read_instance_metadata_value startup_profile)"
+  startup_contract_version="$(read_instance_metadata_value startup_contract_version)"
+  startup_ready_sentinel="$(read_instance_metadata_value startup_ready_sentinel)"
 
-  if [[ -n "${startup_source}" ]] && [[ "${startup_source}" != "embedded-vm-prereqs-v1" ]] && [[ "${startup_source}" != file-sha256:* ]] && [[ "${startup_source}" != url-sha256:* ]]; then
+  if [[ "${startup_profile}" == "custom-startup-script" ]] || [[ "${startup_source}" == file-sha256:* ]] || [[ "${startup_source}" == url-sha256:* ]]; then
+    fail_preflight \
+      "instance '${INSTANCE_NAME}' uses a custom startup contract that this installer will not auto-repair (${startup_profile:-unset} / ${startup_source:-unset})" \
+      "use a different instance name or migrate this VM to startup_profile=${STARTUP_PROFILE_EXPECTED} with startup_script_source=${STARTUP_SOURCE_EXPECTED}"
+  fi
+
+  if [[ -n "${startup_source}" ]] && [[ "${startup_source}" != "${STARTUP_SOURCE_EXPECTED}" ]]; then
     fail_preflight \
       "existing instance '${INSTANCE_NAME}' uses unsupported startup_script_source '${startup_source}'" \
-      "select a different instance name or migrate the VM to the vm-prereqs startup contract first"
+      "run ${REPAIR_BOOTSTRAP_SCRIPT} to migrate startup metadata, then rerun install.sh"
   fi
 
-  if [[ -n "${startup_profile}" ]] && [[ "${startup_profile}" != "vm-prereqs-v1" ]] && [[ "${startup_profile}" != "custom-startup-script" ]]; then
+  if [[ -n "${startup_profile}" ]] && [[ "${startup_profile}" != "${STARTUP_PROFILE_EXPECTED}" ]]; then
     fail_preflight \
       "existing instance '${INSTANCE_NAME}' uses unsupported startup_profile '${startup_profile}'" \
-      "select a different instance name or update startup metadata to vm-prereqs-v1"
+      "run ${REPAIR_BOOTSTRAP_SCRIPT} to migrate startup metadata, then rerun install.sh"
   fi
+
+  if [[ -n "${startup_contract_version}" ]] && [[ "${startup_contract_version}" != "${STARTUP_CONTRACT_VERSION_EXPECTED}" ]]; then
+    fail_preflight \
+      "existing instance '${INSTANCE_NAME}' uses unsupported startup_contract_version '${startup_contract_version}'" \
+      "run ${REPAIR_BOOTSTRAP_SCRIPT} to migrate startup metadata, then rerun install.sh"
+  fi
+
+  if [[ -n "${startup_ready_sentinel}" ]] && [[ "${startup_ready_sentinel}" != "${STARTUP_READY_SENTINEL_EXPECTED}" ]]; then
+    fail_preflight \
+      "existing instance '${INSTANCE_NAME}' uses unsupported startup_ready_sentinel '${startup_ready_sentinel}'" \
+      "run ${REPAIR_BOOTSTRAP_SCRIPT} to migrate startup metadata, then rerun install.sh"
+  fi
+}
+
+get_instance_contract_field() {
+  local key="$1"
+  read_instance_metadata_value "${key}"
+}
+
+instance_contract_matches_expected() {
+  local startup_source
+  local startup_profile
+  local startup_contract_version
+  local startup_ready_sentinel
+  startup_source="$(get_instance_contract_field startup_script_source)"
+  startup_profile="$(get_instance_contract_field startup_profile)"
+  startup_contract_version="$(get_instance_contract_field startup_contract_version)"
+  startup_ready_sentinel="$(get_instance_contract_field startup_ready_sentinel)"
+  [[ "${startup_source}" == "${STARTUP_SOURCE_EXPECTED}" ]] &&
+    [[ "${startup_profile}" == "${STARTUP_PROFILE_EXPECTED}" ]] &&
+    [[ "${startup_contract_version}" == "${STARTUP_CONTRACT_VERSION_EXPECTED}" ]] &&
+    [[ "${startup_ready_sentinel}" == "${STARTUP_READY_SENTINEL_EXPECTED}" ]]
+}
+
+instance_contract_is_repairable() {
+  local startup_source
+  local startup_profile
+  startup_source="$(get_instance_contract_field startup_script_source)"
+  startup_profile="$(get_instance_contract_field startup_profile)"
+  [[ "${startup_profile}" != "custom-startup-script" ]] &&
+    [[ "${startup_source}" != file-sha256:* ]] &&
+    [[ "${startup_source}" != url-sha256:* ]]
+}
+
+build_repair_cmd() {
+  REPAIR_CMD=(
+    bash "${REPAIR_BOOTSTRAP_SCRIPT}"
+    --project-id "${PROJECT_ID}"
+    --instance-name "${INSTANCE_NAME}"
+    --zone "${ZONE}"
+    --run-now
+  )
+  if [[ -n "${OPENCLAW_TAG}" ]]; then
+    REPAIR_CMD+=(--openclaw-tag "${OPENCLAW_TAG}")
+  fi
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    REPAIR_CMD+=(--dry-run)
+  fi
+}
+
+maybe_auto_repair_contract() {
+  if instance_contract_matches_expected; then
+    return 0
+  fi
+
+  if ! instance_contract_is_repairable; then
+    fail_readiness \
+      "instance contract is legacy/unknown and not safe to auto-repair in place" \
+      "choose a different instance name or migrate this VM manually with ${REPAIR_BOOTSTRAP_SCRIPT}"
+  fi
+
+  build_repair_cmd
+  echo "Readiness gate: startup contract mismatch detected; attempting in-place repair."
+  printf 'Repair command:'
+  printf ' %q' "${REPAIR_CMD[@]}"
+  echo
+  "${REPAIR_CMD[@]}" || fail_readiness \
+    "automatic startup contract repair failed" \
+    "rerun the printed repair command manually, then retry install.sh"
+
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    echo "Dry-run: startup contract revalidation would run after repair."
+    return 0
+  fi
+
+  instance_contract_matches_expected || fail_readiness \
+    "startup contract still mismatched after repair" \
+    "inspect metadata and rerun ${REPAIR_BOOTSTRAP_SCRIPT} before retrying install.sh"
+}
+
+build_readiness_ssh_cmd() {
+  local readiness_check
+  read -r -d '' readiness_check <<EOF || true
+set -euo pipefail
+LOG_PATH="${READINESS_LOG_PATH}"
+SENTINEL_PATH="${STARTUP_READY_SENTINEL_EXPECTED}"
+mkdir -p "\$(dirname "\${LOG_PATH}")"
+{
+  echo "[readiness] started_at_utc=\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if [[ ! -f "\${SENTINEL_PATH}" ]]; then
+    echo "[readiness] missing sentinel: \${SENTINEL_PATH}"
+    exit 20
+  fi
+  if pgrep -f "apt-get|apt.systemd.daily|unattended-upgrade|dpkg" >/dev/null 2>&1; then
+    echo "[readiness] package manager activity still running"
+    exit 21
+  fi
+  echo "[readiness] sentinel present and no package-manager activity detected"
+  echo "[readiness] status=ready"
+} 2>&1 | tee -a "\${LOG_PATH}"
+EOF
+
+  READINESS_SSH_CMD=(
+    gcloud compute ssh "${INSTANCE_NAME}"
+    --project "${PROJECT_ID}"
+    --zone "${ZONE}"
+    --tunnel-through-iap
+    --command "bash -lc $(printf '%q' "${readiness_check}")"
+  )
+}
+
+run_readiness_probe() {
+  build_readiness_ssh_cmd
+  echo "Readiness gate: probing VM startup contract and host readiness."
+  echo "Readiness log contract: ${READINESS_LOG_PATH}"
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    echo "Dry-run command (readiness probe):"
+    printf ' %q' "${READINESS_SSH_CMD[@]}"
+    echo
+    return 0
+  fi
+
+  "${READINESS_SSH_CMD[@]}" || fail_readiness \
+    "remote readiness probe failed" \
+    "wait for startup to finish and rerun install.sh; if needed rerun ${REPAIR_BOOTSTRAP_SCRIPT} --run-now"
+}
+
+run_readiness_gate() {
+  if [[ "${INSTANCE_REUSED}" == "true" ]]; then
+    maybe_auto_repair_contract
+  else
+    echo "Readiness gate: target path is create/new; reuse-repair branch skipped."
+  fi
+  run_readiness_probe
+  echo "Readiness gate passed."
 }
 
 run_preflight() {
   echo "Running local preflight checks..."
   require_gcloud
   resolve_project_id
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    echo "Dry-run: skipping live auth/project/API/firewall validations."
+    validate_zone_region_pair
+    echo "Preflight checks passed."
+    echo "Note: IAM effectiveness and guest-level reachability are validated in later readiness/SSH stages."
+    return
+  fi
   check_active_auth
   check_project_access
   check_api_enabled compute.googleapis.com
@@ -275,6 +471,7 @@ done
 [[ -n "${INSTANCE_NAME}" ]] || die "--instance-name cannot be empty"
 [[ -n "${TEMPLATE_NAME}" ]] || die "--template-name cannot be empty"
 [[ -f "${CREATE_INSTANCE_SCRIPT}" ]] || die "missing helper script: ${CREATE_INSTANCE_SCRIPT}"
+[[ -f "${REPAIR_BOOTSTRAP_SCRIPT}" ]] || die "missing helper script: ${REPAIR_BOOTSTRAP_SCRIPT}"
 validate_zone_region_pair
 
 if [[ "${NON_INTERACTIVE_MODE}" == "auto" ]]; then
@@ -292,6 +489,7 @@ fi
 run_preflight
 
 if instance_exists; then
+  INSTANCE_REUSED="true"
   check_existing_instance_eligibility
   echo "Reusing existing instance: ${INSTANCE_NAME}"
   if [[ "${DRY_RUN}" == "true" ]]; then
@@ -299,7 +497,12 @@ if instance_exists; then
   fi
 else
   if [[ -z "${OPENCLAW_TAG}" ]]; then
-    prompt_required OPENCLAW_TAG "OpenClaw tag for template metadata: " "${OPENCLAW_TAG}"
+    if [[ "${DRY_RUN}" == "true" ]]; then
+      OPENCLAW_TAG="dry-run-placeholder"
+      echo "Dry-run: using placeholder --openclaw-tag ${OPENCLAW_TAG} for command rendering."
+    else
+      prompt_required OPENCLAW_TAG "OpenClaw tag for template metadata: " "${OPENCLAW_TAG}"
+    fi
   fi
 
   build_create_instance_cmd
@@ -308,4 +511,5 @@ else
 fi
 
 echo "Install preflight + provisioning stage complete."
-echo "Next stage (readiness + SSH handoff) is implemented in downstream beads."
+run_readiness_gate
+echo "Next stage (interactive SSH handoff) is implemented in downstream beads."
