@@ -351,6 +351,20 @@ test_docs_smoke_commands() {
   assert_status 0 "repair-instance-bootstrap example parses in dry-run mode"
 }
 
+test_install_help_and_noninteractive_gcloud_guard() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" --help
+  assert_status 0 "install.sh --help renders usage"
+  assert_contains "${RUN_OUTPUT}" "Create or reuse an OpenClaw VM through the template-backed provisioning flow." "install.sh help describes primary flow"
+
+  run_capture bash -c "env PATH=\"/usr/bin:/bin\" bash \"${ROOT_DIR}/scripts/openclaw-gcp/install.sh\" --project-id test-project --instance-name test-vm --zone asia-southeast1-a </dev/null"
+  assert_status 1 "install.sh fails before provisioning when gcloud is missing"
+  assert_contains "${RUN_OUTPUT}" "Preflight failed: gcloud CLI is not installed or not on PATH" "install.sh reports missing gcloud preflight failure"
+  assert_contains "${RUN_OUTPUT}" "Recovery: install Google Cloud CLI, then run: gcloud init" "install.sh prints exact gcloud recovery command"
+  assert_not_contains "${RUN_OUTPUT}" "Provisioning instance through template-backed flow..." "install.sh does not reach provisioning after preflight failure"
+}
+
 test_cloud_nat_idempotent_flow() {
   local mock_dir
   mock_dir="$(new_mock_env cloud-nat)"
@@ -463,6 +477,7 @@ main() {
   test_template_reuse_rejects_explicit_drift_inputs
   test_snapshot_policy_reuse_and_region_default_zone
   test_docs_smoke_commands
+  test_install_help_and_noninteractive_gcloud_guard
   test_cloud_nat_idempotent_flow
   test_repair_instance_bootstrap_flow
   test_negative_guards
