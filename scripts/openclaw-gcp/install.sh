@@ -25,6 +25,10 @@ STARTUP_CONTRACT_VERSION_EXPECTED="startup-ready-v1"
 STARTUP_READY_SENTINEL_EXPECTED="/var/lib/openclaw/startup-ready-v1"
 READINESS_LOG_PATH="/var/log/openclaw/readiness-gate.log"
 READINESS_LOG_HINT_LINES="200"
+INSTALL_LOG_DIR_REMOTE="\$HOME/.openclaw-gcp/install-logs"
+INSTALL_LOG_LATEST_REMOTE="${INSTALL_LOG_DIR_REMOTE}/latest.log"
+INSTALL_LOG_HINT_LINES="200"
+UPSTREAM_INSTALL_CMD="curl -fsSL https://openclaw.ai/install.sh | bash"
 INSTANCE_REUSED="false"
 
 print_help() {
@@ -81,6 +85,16 @@ fail_readiness() {
   echo "Remote readiness log: ${READINESS_LOG_PATH}" >&2
   echo "Next steps: ${remedy}" >&2
   echo "Log retrieval hint: gcloud compute ssh ${INSTANCE_NAME} --project ${PROJECT_ID} --zone ${ZONE} --tunnel-through-iap --command \"sudo tail -n ${READINESS_LOG_HINT_LINES} ${READINESS_LOG_PATH}\"" >&2
+  exit 1
+}
+
+fail_install_handoff() {
+  local reason="$1"
+  local remedy="$2"
+  echo "Install handoff failed: ${reason}" >&2
+  echo "Remote installer log hint: ${INSTALL_LOG_LATEST_REMOTE}" >&2
+  echo "Next steps: ${remedy}" >&2
+  echo "Log retrieval hint: gcloud compute ssh ${INSTANCE_NAME} --project ${PROJECT_ID} --zone ${ZONE} --tunnel-through-iap --command \"bash -lc 'tail -n ${INSTALL_LOG_HINT_LINES} ${INSTALL_LOG_LATEST_REMOTE}'\"" >&2
   exit 1
 }
 
@@ -395,6 +409,63 @@ run_readiness_gate() {
   echo "Readiness gate passed."
 }
 
+build_install_handoff_ssh_cmd() {
+  local remote_install_script
+  read -r -d '' remote_install_script <<EOF || true
+set -euo pipefail
+LOG_DIR="${INSTALL_LOG_DIR_REMOTE}"
+LATEST_LOG="${INSTALL_LOG_LATEST_REMOTE}"
+INSTALLER_CMD="${UPSTREAM_INSTALL_CMD}"
+mkdir -p "\${LOG_DIR}"
+RUN_LOG="\${LOG_DIR}/install-\$(date -u +%Y%m%dT%H%M%SZ).log"
+echo "[handoff] launching upstream installer with PTY transcript capture"
+echo "[handoff] run log: \${RUN_LOG}"
+if ! command -v script >/dev/null 2>&1; then
+  echo "[handoff] missing required 'script' command for PTY-preserving capture" >&2
+  exit 42
+fi
+if script -qefc "\${INSTALLER_CMD}" "\${RUN_LOG}"; then
+  ln -sfn "\${RUN_LOG}" "\${LATEST_LOG}"
+  echo "[handoff] upstream installer completed successfully"
+  echo "[handoff] latest log symlink: \${LATEST_LOG}"
+  exec bash -il
+fi
+installer_rc=\$?
+ln -sfn "\${RUN_LOG}" "\${LATEST_LOG}"
+echo "[handoff] upstream installer exited with code \${installer_rc}" >&2
+echo "[handoff] latest log symlink: \${LATEST_LOG}" >&2
+exit "\${installer_rc}"
+EOF
+
+  INSTALL_HANDOFF_SSH_CMD=(
+    gcloud compute ssh "${INSTANCE_NAME}"
+    --project "${PROJECT_ID}"
+    --zone "${ZONE}"
+    --tunnel-through-iap
+    --command "bash -lc $(printf '%q' "${remote_install_script}")"
+    --
+    -t
+  )
+}
+
+run_install_handoff() {
+  build_install_handoff_ssh_cmd
+  echo "Interactive SSH handoff stage: launching upstream installer."
+  echo "Handoff installer command: ${UPSTREAM_INSTALL_CMD}"
+  echo "Remote installer log contract: ${INSTALL_LOG_LATEST_REMOTE}"
+
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    echo "Dry-run command (interactive SSH handoff):"
+    printf ' %q' "${INSTALL_HANDOFF_SSH_CMD[@]}"
+    echo
+    return 0
+  fi
+
+  "${INSTALL_HANDOFF_SSH_CMD[@]}" || fail_install_handoff \
+    "upstream installer exited non-zero or SSH handoff could not be completed" \
+    "inspect the remote installer log, resolve the issue, and rerun install.sh"
+}
+
 run_preflight() {
   echo "Running local preflight checks..."
   require_gcloud
@@ -512,4 +583,4 @@ fi
 
 echo "Install preflight + provisioning stage complete."
 run_readiness_gate
-echo "Next stage (interactive SSH handoff) is implemented in downstream beads."
+run_install_handoff
