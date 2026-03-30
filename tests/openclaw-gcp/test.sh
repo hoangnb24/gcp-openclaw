@@ -132,6 +132,16 @@ if [[ "$*" == *"compute firewall-rules list"* ]]; then
   exit 0
 fi
 
+if [[ "$*" == *"compute ssh"* ]] && [[ "${MOCK_SSH_FAIL:-false}" == "true" ]]; then
+  echo "mocked ssh failure" >&2
+  exit 73
+fi
+
+if [[ "$*" == *"compute ssh"* ]] && [[ "${MOCK_SSH_FAIL_HANDOFF:-false}" == "true" ]] && [[ "$*" == *"openclaw.ai/install.sh"* ]]; then
+  echo "mocked ssh failure" >&2
+  exit 73
+fi
+
 if [[ "$*" == *"compute instances list"* && "$*" == *"--format=value(zone.basename())"* ]]; then
   if [[ -n "${MOCK_INSTANCE_EXISTING_ZONE:-}" ]]; then
     printf '%s\n' "${MOCK_INSTANCE_EXISTING_ZONE}"
@@ -464,6 +474,27 @@ test_install_help_and_noninteractive_gcloud_guard() {
   assert_not_contains "${RUN_OUTPUT}" "Provisioning instance through template-backed flow..." "install.sh does not reach provisioning after preflight failure"
 }
 
+test_install_prompt_and_nonprompt_behavior() {
+  local mock_dir
+  mock_dir="$(new_mock_env install-prompt-nonprompt)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" MOCK_PROJECT_ID="(unset)" \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --instance-name oc-main \
+    --zone asia-southeast1-a \
+    --non-interactive \
+    --dry-run
+
+  assert_status 1 "install.sh non-interactive mode rejects missing required project input"
+  assert_contains "${RUN_OUTPUT}" "missing required input PROJECT_ID in non-interactive mode" "install.sh explains non-interactive missing input failure"
+
+  run_capture bash -c "printf 'hoangnb-openclaw\n' | env PATH=\"${mock_dir}/bin:\${PATH}\" MOCK_GCLOUD_LOG=\"${mock_dir}/gcloud.log\" MOCK_PROJECT_ID=\"(unset)\" MOCK_INSTANCE_EXISTS=true bash \"${ROOT_DIR}/scripts/openclaw-gcp/install.sh\" --interactive --instance-name oc-main --zone asia-southeast1-a --dry-run"
+
+  assert_status 0 "install.sh interactive mode prompts and accepts missing project input"
+  assert_contains "${RUN_OUTPUT}" "Preflight checks passed." "install.sh interactive prompt path completes preflight"
+}
+
 test_install_readiness_gate_dry_run_contract() {
   local mock_dir
   mock_dir="$(new_mock_env install-readiness-dry-run)"
@@ -480,6 +511,53 @@ test_install_readiness_gate_dry_run_contract() {
   assert_contains "${RUN_OUTPUT}" "Readiness gate: probing VM startup contract and host readiness." "install.sh dry-run announces readiness stage"
   assert_contains "${RUN_OUTPUT}" "Readiness log contract: /var/log/openclaw/readiness-gate.log" "install.sh dry-run prints readiness log path contract"
   assert_contains "${RUN_OUTPUT}" "Dry-run command (readiness probe):" "install.sh dry-run prints readiness probe command"
+}
+
+test_install_reuse_eligibility_guardrails() {
+  local mock_dir
+  mock_dir="$(new_mock_env install-reuse-eligibility)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_STARTUP_PROFILE=legacy-bootstrap-v10 \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --zone asia-southeast1-a
+
+  assert_status 1 "install.sh rejects reused instances with unsupported startup profile"
+  assert_contains "${RUN_OUTPUT}" "unsupported startup_profile 'legacy-bootstrap-v10'" "install.sh explains unsupported reuse profile"
+  assert_not_contains "${RUN_OUTPUT}" "Interactive SSH handoff stage: launching upstream installer." "install.sh stops before SSH handoff when reuse eligibility fails"
+}
+
+test_install_ssh_handoff_contract_and_failure_summary() {
+  local mock_dir
+  mock_dir="$(new_mock_env install-ssh-handoff)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" MOCK_INSTANCE_EXISTS=true \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --zone asia-southeast1-a \
+    --dry-run
+
+  assert_status 0 "install.sh dry-run prints interactive SSH handoff command contract"
+  assert_contains "${RUN_OUTPUT}" "Dry-run command (interactive SSH handoff):" "install.sh dry-run prints handoff command"
+  assert_contains "${RUN_OUTPUT}" "--tunnel-through-iap" "install.sh handoff command preserves IAP SSH posture"
+  assert_contains "${RUN_OUTPUT}" "curl -fsSL https://openclaw.ai/install.sh | bash" "install.sh handoff command includes upstream installer"
+  assert_contains "${RUN_OUTPUT}" " -- -t" "install.sh handoff command requests interactive TTY"
+
+  run_capture run_with_mock "${mock_dir}" MOCK_INSTANCE_EXISTS=true MOCK_SSH_FAIL_HANDOFF=true \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --zone asia-southeast1-a
+
+  assert_status 1 "install.sh prints local failure summary when SSH handoff fails"
+  assert_contains "${RUN_OUTPUT}" "Install handoff failed: upstream installer exited non-zero or SSH handoff could not be completed" "install.sh prints install handoff failure summary"
+  assert_contains "${RUN_OUTPUT}" "Remote installer log hint: \$HOME/.openclaw-gcp/install-logs/latest.log" "install.sh prints remote installer log hint on failure"
 }
 
 test_cloud_nat_idempotent_flow() {
@@ -596,7 +674,10 @@ main() {
   test_snapshot_policy_reuse_and_region_default_zone
   test_docs_smoke_commands
   test_install_help_and_noninteractive_gcloud_guard
+  test_install_prompt_and_nonprompt_behavior
   test_install_readiness_gate_dry_run_contract
+  test_install_reuse_eligibility_guardrails
+  test_install_ssh_handoff_contract_and_failure_summary
   test_cloud_nat_idempotent_flow
   test_repair_instance_bootstrap_flow
   test_negative_guards
