@@ -1,5 +1,7 @@
 # Backup And Restore Runbook
 
+Primary provisioning/onboarding flow lives in `bash scripts/openclaw-gcp/install.sh`. This document covers day-2 data protection and recovery workflows after the VM is in service.
+
 This repository uses two complementary protection layers for persistent OpenClaw instances on GCP:
 
 1. recurring disk snapshots through a resource policy
@@ -210,4 +212,4 @@ bash scripts/openclaw-gcp/spawn-from-image.sh \
 - validate `openclaw status`
 - validate `curl -fsS http://127.0.0.1:18789/healthz`
 - reattach or confirm the snapshot policy on the active boot disk
-- rerun `openclaw-docker-setup` if the restored VM needs the host baseline refreshed
+- rerun `bash scripts/openclaw-gcp/install.sh` if you need to re-validate local prerequisites and refresh the installer-driven onboarding path on a replacement VM
