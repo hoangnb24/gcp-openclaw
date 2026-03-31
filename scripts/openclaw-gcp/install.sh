@@ -421,8 +421,12 @@ set -euo pipefail
 LOG_DIR="${INSTALL_LOG_DIR_REMOTE}"
 LATEST_LOG="${INSTALL_LOG_LATEST_REMOTE}"
 INSTALLER_CMD="${UPSTREAM_INSTALL_CMD}"
-mkdir -p "\${LOG_DIR}"
+umask 077
+mkdir -m 700 -p "\${LOG_DIR}"
+chmod 700 "\${LOG_DIR}"
 RUN_LOG="\${LOG_DIR}/install-\$(date -u +%Y%m%dT%H%M%SZ).log"
+touch "\${RUN_LOG}"
+chmod 600 "\${RUN_LOG}"
 echo "[handoff] launching upstream installer with PTY transcript capture"
 echo "[handoff] run log: \${RUN_LOG}"
 if ! command -v script >/dev/null 2>&1; then
