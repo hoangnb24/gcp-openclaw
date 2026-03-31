@@ -48,6 +48,14 @@ require_command() {
   fi
 }
 
+validate_metadata_value() {
+  local field_name="$1"
+  local field_value="$2"
+  [[ "${field_value}" != *","* ]] || die "${field_name} must not contain ',' because it is persisted in metadata"
+  [[ "${field_value}" != *"="* ]] || die "${field_name} must not contain '=' because it is persisted in metadata"
+  [[ "${field_value}" != *$'\n'* ]] || die "${field_name} must not contain newlines"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project-id) PROJECT_ID="${2:-}"; shift 2 ;;
@@ -66,6 +74,17 @@ done
 [[ -n "${PROJECT_ID}" ]] || die "--project-id is required"
 [[ -n "${INSTANCE_NAME}" ]] || die "--instance-name is required"
 [[ -f "${BOOTSTRAP_SCRIPT}" ]] || die "missing bootstrap script: ${BOOTSTRAP_SCRIPT}"
+[[ -n "${OPENCLAW_IMAGE}" ]] || die "--openclaw-image cannot be empty"
+
+validate_metadata_value "openclaw_image" "${OPENCLAW_IMAGE}"
+if [[ -n "${OPENCLAW_TAG}" ]]; then
+  validate_metadata_value "openclaw_tag" "${OPENCLAW_TAG}"
+fi
+validate_metadata_value "startup_script_source" "${STARTUP_SCRIPT_SOURCE}"
+validate_metadata_value "startup_profile" "${STARTUP_PROFILE}"
+validate_metadata_value "startup_contract_version" "${STARTUP_CONTRACT_VERSION}"
+validate_metadata_value "startup_ready_sentinel" "${STARTUP_READY_SENTINEL}"
+validate_metadata_value "readiness_log_path" "${READINESS_LOG_PATH}"
 
 if [[ "${DRY_RUN}" != "true" ]]; then
   require_command gcloud

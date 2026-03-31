@@ -668,6 +668,42 @@ test_repair_instance_bootstrap_flow() {
   assert_contains "${log_content}" "GCLOUD compute ssh oc-main --project hoangnb-openclaw --zone asia-southeast1-a --tunnel-through-iap --command sudo google_metadata_script_runner startup" "repair-instance-bootstrap reruns startup over IAP by default"
 }
 
+test_repair_instance_bootstrap_rejects_invalid_metadata_values() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/repair-instance-bootstrap.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --openclaw-image "bad,image" \
+    --dry-run
+  assert_status 1 "repair-instance-bootstrap rejects openclaw-image values with commas"
+  assert_contains "${RUN_OUTPUT}" "openclaw_image must not contain ',' because it is persisted in metadata" "repair-instance-bootstrap explains comma metadata guard"
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/repair-instance-bootstrap.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --openclaw-image "bad=value" \
+    --dry-run
+  assert_status 1 "repair-instance-bootstrap rejects openclaw-image values with equals signs"
+  assert_contains "${RUN_OUTPUT}" "openclaw_image must not contain '=' because it is persisted in metadata" "repair-instance-bootstrap explains equals metadata guard"
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/repair-instance-bootstrap.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --openclaw-tag $'bad\ntag' \
+    --dry-run
+  assert_status 1 "repair-instance-bootstrap rejects openclaw-tag values with newlines"
+  assert_contains "${RUN_OUTPUT}" "openclaw_tag must not contain newlines" "repair-instance-bootstrap explains newline metadata guard"
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/repair-instance-bootstrap.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --openclaw-image "" \
+    --dry-run
+  assert_status 1 "repair-instance-bootstrap rejects empty openclaw-image values"
+  assert_contains "${RUN_OUTPUT}" "--openclaw-image cannot be empty" "repair-instance-bootstrap explains empty openclaw-image guard"
+}
+
 test_negative_guards() {
   local startup_file="${TMP_DIR}/startup.sh"
   TESTS_RUN=$((TESTS_RUN + 1))
@@ -751,6 +787,7 @@ main() {
   test_install_ssh_handoff_contract_and_failure_summary
   test_cloud_nat_idempotent_flow
   test_repair_instance_bootstrap_flow
+  test_repair_instance_bootstrap_rejects_invalid_metadata_values
   test_negative_guards
 
   if (( TESTS_FAILED > 0 )); then
