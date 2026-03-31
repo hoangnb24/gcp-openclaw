@@ -24,6 +24,23 @@ If upstream install fails, the wrapper returns locally with a failure summary an
 - Readiness contract: startup sentinel and package-manager-idle gating before installer handoff
 - Handoff behavior: PTY-preserving transcript capture and success continuity via `exec bash -il`
 
+## Destroy Companion
+
+Use the repo-native destroy companion to plan or run teardown for the exact resources you name.
+The script does not do broad discovery, and `--dry-run` is the safe first step before any real deletion.
+
+```bash
+bash scripts/openclaw-gcp/destroy.sh \
+  --project-id <gcp-project-id> \
+  --instance-name oc-main \
+  --template-name oc-template \
+  --router-name oc-router \
+  --nat-name oc-nat \
+  --dry-run
+```
+
+For full teardown guidance, optional extras (snapshot policy, clone instance, machine image), and confirmation behavior, use the [OpenClaw GCP operator runbook](docs/openclaw-gcp/README.md).
+
 ## Day-2 Operations
 
 - [Operator runbook](docs/openclaw-gcp/README.md)
