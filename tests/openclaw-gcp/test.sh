@@ -678,6 +678,26 @@ test_docs_smoke_commands() {
     --dry-run
   assert_status 0 "README Cloud NAT example parses in dry-run mode"
 
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --template-name oc-template \
+    --router-name oc-router \
+    --nat-name oc-nat \
+    --dry-run
+  assert_status 0 "README destroy companion example parses in dry-run mode"
+  assert_contains "${RUN_OUTPUT}" "Phase 1 target order:" "README destroy companion example emits teardown target order"
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --template-name oc-template \
+    --router-name oc-router \
+    --nat-name oc-nat \
+    --dry-run
+  assert_status 0 "runbook destroy dry-run example parses in dry-run mode"
+  assert_contains "${RUN_OUTPUT}" "Dry-run mode: no resources were modified." "runbook destroy dry-run example stays mutation-safe"
+
   run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/repair-instance-bootstrap.sh" \
     --project-id hoangnb-openclaw \
     --instance-name oc-main \
