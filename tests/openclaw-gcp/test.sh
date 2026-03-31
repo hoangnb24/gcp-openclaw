@@ -63,6 +63,31 @@ assert_not_contains() {
   fi
 }
 
+assert_ordered_line_patterns() {
+  local text="$1"
+  local first_pattern="$2"
+  local second_pattern="$3"
+  local message="$4"
+  local first_line=""
+  local second_line=""
+
+  first_line="$(printf '%s\n' "${text}" | grep -n "${first_pattern}" | head -n1 | cut -d: -f1 || true)"
+  second_line="$(printf '%s\n' "${text}" | grep -n "${second_pattern}" | head -n1 | cut -d: -f1 || true)"
+
+  if [[ -z "${first_line}" || -z "${second_line}" ]]; then
+    fail "${message} (missing pattern)"
+    printf '%s\n' "${text}"
+    return
+  fi
+
+  if (( first_line < second_line )); then
+    pass "${message}"
+  else
+    fail "${message} (order mismatch: ${first_pattern} should precede ${second_pattern})"
+    printf '%s\n' "${text}"
+  fi
+}
+
 new_mock_env() {
   local name="$1"
   local dir="${TMP_DIR}/${name}"
@@ -221,6 +246,20 @@ if [[ "$*" == *"compute images describe"* && "$*" == *"--format=value(selfLink)"
 fi
 
 if [[ "$*" == *"compute instance-templates describe"* ]]; then
+  if [[ "$*" == *"--flatten=properties.metadata.items[]"* && "$*" == *"--format=value(properties.metadata.items.key,properties.metadata.items.value)"* ]]; then
+    if [[ "${MOCK_DESTROY_TEMPLATE_DESCRIBE_FAIL:-false}" == "true" ]]; then
+      exit 1
+    fi
+    if [[ -n "${MOCK_DESTROY_TEMPLATE_METADATA_LINES:-}" ]]; then
+      printf '%b\n' "${MOCK_DESTROY_TEMPLATE_METADATA_LINES}"
+      exit 0
+    fi
+    printf 'startup_script_source\t%s\n' "${MOCK_DESTROY_STARTUP_SCRIPT_SOURCE:-embedded-vm-prereqs-v1}"
+    printf 'startup_profile\t%s\n' "${MOCK_DESTROY_STARTUP_PROFILE:-vm-prereqs-v1}"
+    printf 'startup_contract_version\t%s\n' "${MOCK_DESTROY_STARTUP_CONTRACT_VERSION:-startup-ready-v1}"
+    printf 'startup_ready_sentinel\t%s\n' "${MOCK_DESTROY_STARTUP_READY_SENTINEL:-/var/lib/openclaw/startup-ready-v1}"
+    exit 0
+  fi
   if [[ "$*" == *"accessConfigs"* ]]; then
     if [[ "${MOCK_TEMPLATE_HAS_EXTERNAL_IP:-false}" == "true" ]]; then
       printf '%s\n' "External NAT"
@@ -266,6 +305,18 @@ if [[ "$*" == *"compute instances describe"* && "$*" == *"--flatten=metadata.ite
   exit 0
 fi
 
+if [[ "$*" == *"compute instances describe"* && "$*" == *"--flatten=disks[]"* && "$*" == *"--format=value(disks.boot,disks.autoDelete)"* ]]; then
+  if [[ "${MOCK_DESTROY_INSTANCE_DESCRIBE_FAIL:-false}" == "true" ]]; then
+    exit 1
+  fi
+  if [[ -n "${MOCK_DESTROY_DISK_ROWS:-}" ]]; then
+    printf '%b\n' "${MOCK_DESTROY_DISK_ROWS}"
+    exit 0
+  fi
+  printf '%s\n' "true true"
+  exit 0
+fi
+
 if [[ "$*" == *"compute instances add-metadata"* ]]; then
   metadata_string=""
   for ((i=1; i <= $#; i++)); do
@@ -291,6 +342,17 @@ if [[ "$*" == *"compute resource-policies describe"* ]]; then
 fi
 
 if [[ "$*" == *"compute routers describe"* ]]; then
+  if [[ "$*" == *"--format=value(network.basename())"* ]]; then
+    if [[ "${MOCK_DESTROY_ROUTER_DESCRIBE_FAIL:-false}" == "true" ]]; then
+      exit 1
+    fi
+    if [[ -n "${MOCK_DESTROY_ROUTER_NETWORK_ROWS:-}" ]]; then
+      printf '%b\n' "${MOCK_DESTROY_ROUTER_NETWORK_ROWS}"
+      exit 0
+    fi
+    printf '%s\n' "${MOCK_DESTROY_ROUTER_NETWORK:-default}"
+    exit 0
+  fi
   if [[ "${MOCK_ROUTER_EXISTS:-false}" == "true" ]]; then
     printf '%s\n' "${MOCK_ROUTER_NAME:-oc-router}"
     exit 0
@@ -299,11 +361,54 @@ if [[ "$*" == *"compute routers describe"* ]]; then
 fi
 
 if [[ "$*" == *"compute routers nats describe"* ]]; then
+  if [[ "$*" == *"--format=value(natIpAllocateOption,sourceSubnetworkIpRangesToNat)"* ]]; then
+    if [[ "${MOCK_DESTROY_NAT_DESCRIBE_FAIL:-false}" == "true" ]]; then
+      exit 1
+    fi
+    if [[ -n "${MOCK_DESTROY_NAT_MODE_ROWS:-}" ]]; then
+      printf '%b\n' "${MOCK_DESTROY_NAT_MODE_ROWS}"
+      exit 0
+    fi
+    printf '%s\n' "AUTO_ONLY ALL_SUBNETWORKS_ALL_IP_RANGES"
+    exit 0
+  fi
   if [[ "${MOCK_NAT_EXISTS:-false}" == "true" ]]; then
     printf '%s\n' "${MOCK_NAT_NAME:-oc-nat}"
     exit 0
   fi
   exit 1
+fi
+
+if [[ "$*" == *"compute instances delete"* ]]; then
+  if [[ "${MOCK_DESTROY_FAIL_INSTANCE_DELETE:-false}" == "true" ]]; then
+    echo "mocked instance delete failure" >&2
+    exit 41
+  fi
+  exit 0
+fi
+
+if [[ "$*" == *"compute instance-templates delete"* ]]; then
+  if [[ "${MOCK_DESTROY_FAIL_TEMPLATE_DELETE:-false}" == "true" ]]; then
+    echo "mocked template delete failure" >&2
+    exit 42
+  fi
+  exit 0
+fi
+
+if [[ "$*" == *"compute routers nats delete"* ]]; then
+  if [[ "${MOCK_DESTROY_FAIL_NAT_DELETE:-false}" == "true" ]]; then
+    echo "mocked NAT delete failure" >&2
+    exit 43
+  fi
+  exit 0
+fi
+
+if [[ "$*" == *"compute routers delete"* ]]; then
+  if [[ "${MOCK_DESTROY_FAIL_ROUTER_DELETE:-false}" == "true" ]]; then
+    echo "mocked router delete failure" >&2
+    exit 44
+  fi
+  exit 0
 fi
 
 for arg in "$@"; do
@@ -789,6 +894,154 @@ test_repair_instance_bootstrap_rejects_invalid_metadata_values() {
   assert_contains "${RUN_OUTPUT}" "--openclaw-image cannot be empty" "repair-instance-bootstrap explains empty openclaw-image guard"
 }
 
+test_destroy_help_parser_and_confirmation_contract() {
+  local mock_dir
+  mock_dir="$(new_mock_env destroy-help-parser)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" --help
+  assert_status 0 "destroy.sh --help renders usage"
+  assert_contains "${RUN_OUTPUT}" "Destroy the standard OpenClaw GCP deployment by exact resource names." "destroy.sh help describes exact-name contract"
+  assert_contains "${RUN_OUTPUT}" "--dry-run prints plan and commands without mutating resources" "destroy.sh help describes dry-run safety contract"
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" --project-id
+  assert_status 1 "destroy.sh rejects missing values for value-taking flags"
+  assert_contains "${RUN_OUTPUT}" "Error: missing value for --project-id" "destroy.sh reports a controlled missing-value parser error"
+  assert_not_contains "${RUN_OUTPUT}" "shift count out of range" "destroy.sh avoids raw shell shift failures for missing option values"
+
+  run_capture bash -c "printf 'NOPE\n' | env PATH=\"${mock_dir}/bin:\${PATH}\" MOCK_GCLOUD_LOG=\"${mock_dir}/gcloud.log\" bash \"${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh\" --project-id hoangnb-openclaw --interactive"
+  assert_status 1 "destroy.sh interactive mode requires typed confirmation"
+  assert_contains "${RUN_OUTPUT}" "typed confirmation did not match; aborting" "destroy.sh rejects incorrect typed confirmation token"
+
+  local log_content
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete" "destroy.sh confirmation failure emits no instance delete command"
+  assert_not_contains "${log_content}" "GCLOUD compute instance-templates delete" "destroy.sh confirmation failure emits no template delete command"
+  assert_not_contains "${log_content}" "GCLOUD compute routers nats delete" "destroy.sh confirmation failure emits no NAT delete command"
+  assert_not_contains "${log_content}" "GCLOUD compute routers delete" "destroy.sh confirmation failure emits no router delete command"
+}
+
+test_destroy_dry_run_contract() {
+  local mock_dir
+  mock_dir="$(new_mock_env destroy-dry-run)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --dry-run
+
+  assert_status 0 "destroy.sh dry-run succeeds"
+  assert_contains "${RUN_OUTPUT}" "Phase 1 target order:" "destroy.sh dry-run prints deterministic target order"
+  assert_contains "${RUN_OUTPUT}" "gcloud compute instances delete oc-main" "destroy.sh dry-run prints planned instance delete command"
+  assert_contains "${RUN_OUTPUT}" "gcloud compute instance-templates delete oc-template" "destroy.sh dry-run prints planned template delete command"
+  assert_contains "${RUN_OUTPUT}" "gcloud compute routers nats delete oc-nat" "destroy.sh dry-run prints planned NAT delete command"
+  assert_contains "${RUN_OUTPUT}" "gcloud compute routers delete oc-router" "destroy.sh dry-run prints planned router delete command"
+  assert_contains "${RUN_OUTPUT}" "Dry-run mode: no resources were modified." "destroy.sh dry-run reports no mutations"
+  assert_not_contains "${RUN_OUTPUT}" "Running Phase 1 qualification checks..." "destroy.sh dry-run exits before qualification checks"
+
+  local log_content
+  log_content="$(cat "${mock_dir}/gcloud.log" 2>/dev/null || true)"
+  assert_not_contains "${log_content}" "GCLOUD compute instances describe" "destroy.sh dry-run does not invoke instance qualification describes"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete" "destroy.sh dry-run emits no delete command"
+}
+
+test_destroy_qualification_failures_block_deletes() {
+  local mock_dir
+  local log_content
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  mock_dir="$(new_mock_env destroy-qual-extra-disk)"
+  run_capture run_with_mock "${mock_dir}" MOCK_DESTROY_DISK_ROWS=$'true true\nfalse true' \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --yes
+  assert_status 1 "destroy.sh rejects instances with extra attached disks"
+  assert_contains "${RUN_OUTPUT}" "Qualification failed [instance-disk-safety]" "destroy.sh reports disk safety predicate failure for extra disk"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete" "extra-disk qualification failure emits no delete commands"
+
+  mock_dir="$(new_mock_env destroy-qual-autodelete)"
+  run_capture run_with_mock "${mock_dir}" MOCK_DESTROY_DISK_ROWS=$'true false' \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --yes
+  assert_status 1 "destroy.sh rejects sole-disk autoDelete=false predicates"
+  assert_contains "${RUN_OUTPUT}" "disk predicate mismatch" "destroy.sh explains autoDelete mismatch"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete" "autoDelete=false qualification failure emits no delete commands"
+
+  mock_dir="$(new_mock_env destroy-qual-template)"
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_DESTROY_TEMPLATE_METADATA_LINES=$'startup_script_source\tembedded-vm-prereqs-v1\nstartup_profile\tvm-prereqs-v1\nstartup_contract_version\tstartup-ready-v1' \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --yes
+  assert_status 1 "destroy.sh rejects template startup metadata drift"
+  assert_contains "${RUN_OUTPUT}" "required metadata key missing: startup_ready_sentinel" "destroy.sh reports missing startup contract metadata key"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete" "template metadata failure emits no delete commands"
+
+  mock_dir="$(new_mock_env destroy-qual-router)"
+  run_capture run_with_mock "${mock_dir}" MOCK_DESTROY_ROUTER_NETWORK=custom-shared-network \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --yes
+  assert_status 1 "destroy.sh rejects router ownership drift"
+  assert_contains "${RUN_OUTPUT}" "Qualification failed [router-network-ownership]" "destroy.sh reports router-network predicate failure"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete" "router ownership failure emits no delete commands"
+
+  mock_dir="$(new_mock_env destroy-qual-nat)"
+  run_capture run_with_mock "${mock_dir}" MOCK_DESTROY_NAT_MODE_ROWS="MANUAL_ONLY ALL_SUBNETWORKS_ALL_IP_RANGES" \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --yes
+  assert_status 1 "destroy.sh rejects NAT allocation-mode drift"
+  assert_contains "${RUN_OUTPUT}" "Qualification failed [nat-parent-and-mode]" "destroy.sh reports NAT mode predicate failure"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete" "NAT mode failure emits no delete commands"
+}
+
+test_destroy_delete_order_and_mixed_failure_summary() {
+  local mock_dir
+  local log_content
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  mock_dir="$(new_mock_env destroy-success-order)"
+  run_capture run_with_mock "${mock_dir}" \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --yes
+
+  assert_status 0 "destroy.sh succeeds when all Phase 1 deletes succeed"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_ordered_line_patterns "${log_content}" "GCLOUD compute instances delete oc-main" "GCLOUD compute instance-templates delete oc-template" "destroy.sh deletes template after instance"
+  assert_ordered_line_patterns "${log_content}" "GCLOUD compute instance-templates delete oc-template" "GCLOUD compute routers nats delete oc-nat" "destroy.sh deletes NAT after template"
+  assert_ordered_line_patterns "${log_content}" "GCLOUD compute routers nats delete oc-nat" "GCLOUD compute routers delete oc-router" "destroy.sh deletes router after NAT"
+  assert_contains "${RUN_OUTPUT}" "instance:oc-main => succeeded" "destroy.sh summary marks instance deletion succeeded"
+  assert_contains "${RUN_OUTPUT}" "template:oc-template => succeeded" "destroy.sh summary marks template deletion succeeded"
+  assert_contains "${RUN_OUTPUT}" "nat:oc-nat => succeeded" "destroy.sh summary marks NAT deletion succeeded"
+  assert_contains "${RUN_OUTPUT}" "router:oc-router => succeeded" "destroy.sh summary marks router deletion succeeded"
+
+  mock_dir="$(new_mock_env destroy-mixed-failure)"
+  run_capture run_with_mock "${mock_dir}" MOCK_DESTROY_FAIL_TEMPLATE_DELETE=true \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --yes
+
+  assert_status 1 "destroy.sh exits non-zero on mixed-success teardown"
+  assert_contains "${RUN_OUTPUT}" "template:oc-template => failed" "destroy.sh summary marks template deletion failed"
+  assert_contains "${RUN_OUTPUT}" "nat:oc-nat => succeeded" "destroy.sh continues to NAT deletion after template failure"
+  assert_contains "${RUN_OUTPUT}" "router:oc-router => succeeded" "destroy.sh continues to router deletion after template failure"
+  assert_contains "${RUN_OUTPUT}" "manual cleanup hint:" "destroy.sh prints manual cleanup hints for failed resources"
+  assert_contains "${RUN_OUTPUT}" "Destroy completed with failures." "destroy.sh prints mixed-failure completion banner"
+
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_contains "${log_content}" "GCLOUD compute routers nats delete oc-nat" "destroy.sh still issues NAT delete in mixed-failure run"
+  assert_contains "${log_content}" "GCLOUD compute routers delete oc-router" "destroy.sh still issues router delete in mixed-failure run"
+}
+
 test_negative_guards() {
   local startup_file="${TMP_DIR}/startup.sh"
   TESTS_RUN=$((TESTS_RUN + 1))
@@ -874,6 +1127,10 @@ main() {
   test_cloud_nat_idempotent_flow
   test_repair_instance_bootstrap_flow
   test_repair_instance_bootstrap_rejects_invalid_metadata_values
+  test_destroy_help_parser_and_confirmation_contract
+  test_destroy_dry_run_contract
+  test_destroy_qualification_failures_block_deletes
+  test_destroy_delete_order_and_mixed_failure_summary
   test_negative_guards
 
   if (( TESTS_FAILED > 0 )); then
