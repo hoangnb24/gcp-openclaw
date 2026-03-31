@@ -227,8 +227,8 @@ read_instance_metadata_value() {
     --project "${PROJECT_ID}" \
     --zone "${ZONE}" \
     --flatten='metadata.items[]' \
-    --filter="metadata.items.key=${metadata_key}" \
-    --format='value(metadata.items.value)' 2>/dev/null || true
+    --format='value(metadata.items.key,metadata.items.value)' 2>/dev/null |
+    awk -F $'\t' -v metadata_key="${metadata_key}" '$1 == metadata_key { print $2; exit }' || true
 }
 
 check_existing_instance_eligibility() {
@@ -256,29 +256,8 @@ check_existing_instance_eligibility() {
       "use a different instance name or migrate this VM to startup_profile=${STARTUP_PROFILE_EXPECTED} with startup_script_source=${STARTUP_SOURCE_EXPECTED}"
   fi
 
-  if [[ -n "${startup_source}" ]] && [[ "${startup_source}" != "${STARTUP_SOURCE_EXPECTED}" ]]; then
-    fail_preflight \
-      "existing instance '${INSTANCE_NAME}' uses unsupported startup_script_source '${startup_source}'" \
-      "run ${REPAIR_BOOTSTRAP_SCRIPT} to migrate startup metadata, then rerun install.sh"
-  fi
-
-  if [[ -n "${startup_profile}" ]] && [[ "${startup_profile}" != "${STARTUP_PROFILE_EXPECTED}" ]]; then
-    fail_preflight \
-      "existing instance '${INSTANCE_NAME}' uses unsupported startup_profile '${startup_profile}'" \
-      "run ${REPAIR_BOOTSTRAP_SCRIPT} to migrate startup metadata, then rerun install.sh"
-  fi
-
-  if [[ -n "${startup_contract_version}" ]] && [[ "${startup_contract_version}" != "${STARTUP_CONTRACT_VERSION_EXPECTED}" ]]; then
-    fail_preflight \
-      "existing instance '${INSTANCE_NAME}' uses unsupported startup_contract_version '${startup_contract_version}'" \
-      "run ${REPAIR_BOOTSTRAP_SCRIPT} to migrate startup metadata, then rerun install.sh"
-  fi
-
-  if [[ -n "${startup_ready_sentinel}" ]] && [[ "${startup_ready_sentinel}" != "${STARTUP_READY_SENTINEL_EXPECTED}" ]]; then
-    fail_preflight \
-      "existing instance '${INSTANCE_NAME}' uses unsupported startup_ready_sentinel '${startup_ready_sentinel}'" \
-      "run ${REPAIR_BOOTSTRAP_SCRIPT} to migrate startup metadata, then rerun install.sh"
-  fi
+  # Legacy built-in startup contracts are allowed to continue so the readiness
+  # gate can repair them in-place. Only custom contracts are rejected here.
 }
 
 get_instance_contract_field() {
@@ -363,6 +342,12 @@ build_readiness_ssh_cmd() {
 set -euo pipefail
 LOG_PATH="${READINESS_LOG_PATH}"
 SENTINEL_PATH="${STARTUP_READY_SENTINEL_EXPECTED}"
+APT_LOCK_FILES=(
+  /var/lib/dpkg/lock-frontend
+  /var/lib/dpkg/lock
+  /var/lib/apt/lists/lock
+  /var/cache/apt/archives/lock
+)
 mkdir -p "\$(dirname "\${LOG_PATH}")"
 {
   echo "[readiness] started_at_utc=\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -370,10 +355,16 @@ mkdir -p "\$(dirname "\${LOG_PATH}")"
     echo "[readiness] missing sentinel: \${SENTINEL_PATH}"
     exit 20
   fi
-  if pgrep -f "apt-get|apt.systemd.daily|unattended-upgrade|dpkg" >/dev/null 2>&1; then
-    echo "[readiness] package manager activity still running"
-    exit 21
+  LOCK_CHECK_CMD=(fuser)
+  if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    LOCK_CHECK_CMD=(sudo -n fuser)
   fi
+  for lock_file in "\${APT_LOCK_FILES[@]}"; do
+    if "\${LOCK_CHECK_CMD[@]}" "\${lock_file}" >/dev/null 2>&1; then
+      echo "[readiness] package-manager lock still held: \${lock_file}"
+      exit 21
+    fi
+  done
   echo "[readiness] sentinel present and no package-manager activity detected"
   echo "[readiness] status=ready"
 } 2>&1 | tee -a "\${LOG_PATH}"

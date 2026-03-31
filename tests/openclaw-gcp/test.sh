@@ -71,7 +71,48 @@ new_mock_env() {
 #!/usr/bin/env bash
 set -euo pipefail
 LOG_FILE="${MOCK_GCLOUD_LOG:?}"
+METADATA_STATE_FILE="${MOCK_METADATA_STATE_FILE:-${LOG_FILE}.metadata}"
 printf 'GCLOUD %s\n' "$*" >>"${LOG_FILE}"
+
+metadata_default_value() {
+  case "$1" in
+    startup_script_source) printf '%s\n' "${MOCK_STARTUP_SCRIPT_SOURCE:-embedded-vm-prereqs-v1}" ;;
+    startup_profile) printf '%s\n' "${MOCK_STARTUP_PROFILE:-vm-prereqs-v1}" ;;
+    startup_contract_version) printf '%s\n' "${MOCK_STARTUP_CONTRACT_VERSION:-startup-ready-v1}" ;;
+    startup_ready_sentinel) printf '%s\n' "${MOCK_STARTUP_READY_SENTINEL:-/var/lib/openclaw/startup-ready-v1}" ;;
+    readiness_log_path) printf '%s\n' "${MOCK_READINESS_LOG_PATH:-/var/log/openclaw/readiness-gate.log}" ;;
+    openclaw_image) printf '%s\n' "${MOCK_OPENCLAW_IMAGE:-ghcr.io/openclawai/gateway}" ;;
+    openclaw_tag) printf '%s\n' "${MOCK_OPENCLAW_TAG:-2026.3.23}" ;;
+    legacy_openclaw_image) printf '%s\n' "${MOCK_LEGACY_OPENCLAW_IMAGE:-}" ;;
+    legacy_openclaw_tag) printf '%s\n' "${MOCK_LEGACY_OPENCLAW_TAG:-}" ;;
+    *) printf '%s\n' "" ;;
+  esac
+}
+
+metadata_current_value() {
+  local key="$1"
+  if [[ -f "${METADATA_STATE_FILE}" ]]; then
+    local line
+    line="$(awk -F '\t' -v key="${key}" '$1 == key { print $2; exit }' "${METADATA_STATE_FILE}")"
+    if [[ -n "${line}" ]]; then
+      printf '%s\n' "${line}"
+      return
+    fi
+  fi
+  metadata_default_value "${key}"
+}
+
+write_metadata_state() {
+  local metadata_string="$1"
+  : >"${METADATA_STATE_FILE}"
+  local pair key value
+  IFS=',' read -r -a metadata_pairs <<<"${metadata_string}"
+  for pair in "${metadata_pairs[@]}"; do
+    key="${pair%%=*}"
+    value="${pair#*=}"
+    printf '%s\t%s\n' "${key}" "${value}" >>"${METADATA_STATE_FILE}"
+  done
+}
 
 if [[ "$*" == *"compute images describe-from-family"* ]]; then
   printf '%s\n' "${MOCK_IMAGE_NAME:-debian-12-bookworm-v20260310}"
@@ -209,21 +250,35 @@ if [[ "$*" == *"compute instances describe"* && "$*" == *"--format=value(name)"*
   exit 1
 fi
 
-if [[ "$*" == *"compute instances describe"* && "$*" == *"--flatten=metadata.items[]"* && "$*" == *"--filter=metadata.items.key="* ]]; then
-  metadata_key=""
-  for arg in "$@"; do
-    if [[ "${arg}" == --filter=metadata.items.key=* ]]; then
-      metadata_key="${arg#--filter=metadata.items.key=}"
+if [[ "$*" == *"compute instances describe"* && "$*" == *"--flatten=metadata.items[]"* && "$*" == *"--format=value(metadata.items.key,metadata.items.value)"* ]]; then
+  for metadata_key in \
+    startup_script_source \
+    startup_profile \
+    startup_contract_version \
+    startup_ready_sentinel \
+    readiness_log_path \
+    openclaw_image \
+    openclaw_tag \
+    legacy_openclaw_image \
+    legacy_openclaw_tag; do
+    printf '%s\t%s\n' "${metadata_key}" "$(metadata_current_value "${metadata_key}")"
+  done
+  exit 0
+fi
+
+if [[ "$*" == *"compute instances add-metadata"* ]]; then
+  metadata_string=""
+  for ((i=1; i <= $#; i++)); do
+    if [[ "${!i}" == "--metadata" ]]; then
+      next=$((i + 1))
+      metadata_string="${!next}"
       break
     fi
   done
-  case "${metadata_key}" in
-    startup_script_source) printf '%s\n' "${MOCK_STARTUP_SCRIPT_SOURCE:-embedded-vm-prereqs-v1}" ;;
-    startup_profile) printf '%s\n' "${MOCK_STARTUP_PROFILE:-vm-prereqs-v1}" ;;
-    startup_contract_version) printf '%s\n' "${MOCK_STARTUP_CONTRACT_VERSION:-startup-ready-v1}" ;;
-    startup_ready_sentinel) printf '%s\n' "${MOCK_STARTUP_READY_SENTINEL:-/var/lib/openclaw/startup-ready-v1}" ;;
-    *) printf '%s\n' "" ;;
-  esac
+  if [[ -n "${metadata_string}" ]]; then
+    write_metadata_state "${metadata_string}"
+  fi
+  printf 'Updated [%s]\n' "https://www.googleapis.com/compute/v1/projects/${MOCK_PROJECT_ID:-hoangnb-openclaw}/zones/${MOCK_INSTANCE_ZONE:-asia-southeast1-a}/instances/${MOCK_INSTANCE_NAME:-oc-main}"
   exit 0
 fi
 
@@ -525,6 +580,9 @@ test_install_readiness_gate_dry_run_contract() {
   assert_contains "${RUN_OUTPUT}" "Readiness log contract: \$HOME/.openclaw-gcp/install-logs/readiness-gate.log" "install.sh dry-run prints readiness log path contract"
   assert_not_contains "${RUN_OUTPUT}" "/var/log/openclaw/readiness-gate.log" "install.sh readiness contract avoids root-owned log path"
   assert_contains "${RUN_OUTPUT}" "Dry-run command (readiness probe):" "install.sh dry-run prints readiness probe command"
+  assert_contains "${RUN_OUTPUT}" "fuser" "install.sh readiness probe uses lock-based package-manager detection"
+  assert_contains "${RUN_OUTPUT}" "/var/lib/dpkg/lock-frontend" "install.sh readiness probe checks dpkg lock files"
+  assert_not_contains "${RUN_OUTPUT}" "pgrep\\ -f\\ \"apt-get\\|apt.systemd.daily\\|unattended-upgrade\\|dpkg\"" "install.sh readiness probe no longer uses broad process-name matching"
 }
 
 test_install_firewall_preflight_predicate() {
@@ -585,15 +643,42 @@ test_install_reuse_eligibility_guardrails() {
 
   run_capture run_with_mock "${mock_dir}" \
     MOCK_INSTANCE_EXISTS=true \
-    MOCK_STARTUP_PROFILE=legacy-bootstrap-v10 \
+    MOCK_STARTUP_PROFILE=custom-startup-script \
+    MOCK_STARTUP_SCRIPT_SOURCE=file-sha256:deadbeef \
     bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
     --project-id hoangnb-openclaw \
     --instance-name oc-main \
     --zone asia-southeast1-a
 
-  assert_status 1 "install.sh rejects reused instances with unsupported startup profile"
-  assert_contains "${RUN_OUTPUT}" "unsupported startup_profile 'legacy-bootstrap-v10'" "install.sh explains unsupported reuse profile"
+  assert_status 1 "install.sh rejects reused instances with custom startup contracts"
+  assert_contains "${RUN_OUTPUT}" "uses a custom startup contract that this installer will not auto-repair" "install.sh explains custom-contract rejection"
   assert_not_contains "${RUN_OUTPUT}" "Interactive SSH handoff stage: launching upstream installer." "install.sh stops before SSH handoff when reuse eligibility fails"
+}
+
+test_install_repairable_reuse_contract_auto_repairs() {
+  local mock_dir
+  mock_dir="$(new_mock_env install-repairable-reuse)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_STARTUP_PROFILE=legacy-bootstrap-v10 \
+    MOCK_STARTUP_SCRIPT_SOURCE=embedded-openclaw-bootstrap-v10 \
+    MOCK_STARTUP_CONTRACT_VERSION=legacy-bootstrap-v10 \
+    MOCK_STARTUP_READY_SENTINEL=/var/lib/openclaw/legacy-ready-v10 \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --zone asia-southeast1-a
+
+  assert_status 0 "install.sh auto-repairs legacy startup contracts for reused instances"
+  assert_contains "${RUN_OUTPUT}" "Readiness gate: startup contract mismatch detected; attempting in-place repair." "install.sh announces in-place repair for repairable reuse contracts"
+  assert_contains "${RUN_OUTPUT}" "Readiness gate passed." "install.sh revalidates successfully after repair"
+  assert_contains "${RUN_OUTPUT}" "Interactive SSH handoff stage: launching upstream installer." "install.sh continues to the SSH handoff after successful repair"
+
+  local log_content
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_contains "${log_content}" "GCLOUD compute instances add-metadata oc-main --project hoangnb-openclaw --zone asia-southeast1-a" "install.sh repair path updates instance metadata before revalidation"
 }
 
 test_install_ssh_handoff_contract_and_failure_summary() {
@@ -784,6 +869,7 @@ main() {
   test_install_firewall_preflight_predicate
   test_install_cross_zone_existing_instance_guard
   test_install_reuse_eligibility_guardrails
+  test_install_repairable_reuse_contract_auto_repairs
   test_install_ssh_handoff_contract_and_failure_summary
   test_cloud_nat_idempotent_flow
   test_repair_instance_bootstrap_flow
