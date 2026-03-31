@@ -9,6 +9,12 @@ ZONE="asia-southeast1-a"
 NETWORK="default"
 ROUTER_NAME="oc-router"
 NAT_NAME="oc-nat"
+SNAPSHOT_POLICY_NAME=""
+SNAPSHOT_POLICY_DISK=""
+SNAPSHOT_POLICY_DISK_ZONE=""
+MACHINE_IMAGE_NAME=""
+CLONE_INSTANCE_NAME=""
+CLONE_ZONE=""
 DRY_RUN="false"
 ASSUME_YES="false"
 NON_INTERACTIVE_MODE="auto"
@@ -31,6 +37,11 @@ Phase 1 scope:
   - Cloud NAT
   - Cloud Router
 
+Phase 2 optional extras (exact-name only when explicitly provided):
+  - Snapshot policy (with optional disk context for future detach checks)
+  - Clone instance
+  - Machine image
+
 Safety contract:
   - Exact-name only (no broad discovery)
   - --dry-run prints plan and commands without mutating resources
@@ -45,6 +56,17 @@ Options:
   --network <name>         VPC network expected for router ownership checks (default: ${NETWORK})
   --router-name <name>     Cloud Router name (default: ${ROUTER_NAME})
   --nat-name <name>        Cloud NAT name (default: ${NAT_NAME})
+  --snapshot-policy-name <name>
+                            Optional snapshot policy to include in destroy flow
+  --snapshot-policy-disk <name>
+                            Optional disk context for snapshot policy handling
+  --snapshot-policy-disk-zone <zone>
+                            Zone for --snapshot-policy-disk (defaults to --zone)
+  --clone-instance-name <name>
+                            Optional clone instance to include in destroy flow
+  --clone-zone <zone>      Zone for --clone-instance-name (defaults to --zone)
+  --machine-image-name <name>
+                            Optional machine image to include in destroy flow
   --dry-run                Print planned delete actions without mutating infrastructure
   --yes                    Skip typed confirmation (for automation only)
   --interactive            Force interactive prompts when required
@@ -132,6 +154,10 @@ validate_zone_region_pair() {
   [[ "${ZONE}" == "${REGION}"-* ]] || die "--zone must belong to --region (got zone=${ZONE}, region=${REGION})"
 }
 
+has_explicit_extra_targets() {
+  [[ -n "${SNAPSHOT_POLICY_NAME}" || -n "${CLONE_INSTANCE_NAME}" || -n "${MACHINE_IMAGE_NAME}" ]]
+}
+
 print_plan_summary() {
   echo "Destroy plan inputs:"
   echo "  project_id: ${PROJECT_ID}"
@@ -146,6 +172,23 @@ print_plan_summary() {
   echo "  assume_yes: ${ASSUME_YES}"
   echo "  interactive_mode: ${INTERACTIVE_MODE}"
   echo
+  if has_explicit_extra_targets; then
+    echo "Phase 2 explicit extra targets:"
+    [[ -n "${SNAPSHOT_POLICY_NAME}" ]] && echo "  snapshot_policy_name: ${SNAPSHOT_POLICY_NAME}"
+    if [[ -n "${SNAPSHOT_POLICY_DISK}" ]]; then
+      echo "  snapshot_policy_disk: ${SNAPSHOT_POLICY_DISK}"
+      echo "  snapshot_policy_disk_zone: ${SNAPSHOT_POLICY_DISK_ZONE}"
+    fi
+    [[ -n "${CLONE_INSTANCE_NAME}" ]] && echo "  clone_instance_name: ${CLONE_INSTANCE_NAME}"
+    [[ -n "${CLONE_INSTANCE_NAME}" ]] && echo "  clone_zone: ${CLONE_ZONE}"
+    [[ -n "${MACHINE_IMAGE_NAME}" ]] && echo "  machine_image_name: ${MACHINE_IMAGE_NAME}"
+    echo
+    echo "Deterministic extra-resource order:"
+    echo "  0) snapshot-policy: ${SNAPSHOT_POLICY_NAME:-not requested}"
+    echo "  5) clone-instance: ${CLONE_INSTANCE_NAME:-not requested}"
+    echo "  6) machine-image: ${MACHINE_IMAGE_NAME:-not requested}"
+    echo
+  fi
   echo "Phase 1 target order:"
   echo "  1) instance: ${INSTANCE_NAME}"
   echo "  2) template: ${TEMPLATE_NAME}"
@@ -179,8 +222,44 @@ print_planned_commands() {
     --region "${REGION}"
     --quiet
   )
+  local snapshot_policy_delete_cmd=(
+    gcloud compute resource-policies delete "${SNAPSHOT_POLICY_NAME}"
+    --project "${PROJECT_ID}"
+    --region "${REGION}"
+    --quiet
+  )
+  local clone_cmd=(
+    gcloud compute instances delete "${CLONE_INSTANCE_NAME}"
+    --project "${PROJECT_ID}"
+    --zone "${CLONE_ZONE}"
+    --quiet
+  )
+  local machine_image_cmd=(
+    gcloud compute machine-images delete "${MACHINE_IMAGE_NAME}"
+    --project "${PROJECT_ID}"
+    --quiet
+  )
 
   echo "Planned delete commands:"
+  if [[ -n "${SNAPSHOT_POLICY_NAME}" && -n "${SNAPSHOT_POLICY_DISK}" ]]; then
+    printf ' %q' \
+      gcloud compute disks describe "${SNAPSHOT_POLICY_DISK}" \
+      --project "${PROJECT_ID}" \
+      --zone "${SNAPSHOT_POLICY_DISK_ZONE}" \
+      --flatten='resourcePolicies[]' \
+      --format='value(resourcePolicies.basename())'
+    echo
+    printf ' %q' \
+      gcloud compute disks remove-resource-policies "${SNAPSHOT_POLICY_DISK}" \
+      --project "${PROJECT_ID}" \
+      --zone "${SNAPSHOT_POLICY_DISK_ZONE}" \
+      --resource-policies "${SNAPSHOT_POLICY_NAME}"
+    echo
+  fi
+  if [[ -n "${SNAPSHOT_POLICY_NAME}" ]]; then
+    printf ' %q' "${snapshot_policy_delete_cmd[@]}"
+    echo
+  fi
   printf ' %q' "${instance_cmd[@]}"
   echo
   printf ' %q' "${template_cmd[@]}"
@@ -189,6 +268,26 @@ print_planned_commands() {
   echo
   printf ' %q' "${router_cmd[@]}"
   echo
+  if [[ -n "${CLONE_INSTANCE_NAME}" ]]; then
+    printf ' %q' \
+      gcloud compute instances describe "${CLONE_INSTANCE_NAME}" \
+      --project "${PROJECT_ID}" \
+      --zone "${CLONE_ZONE}" \
+      --flatten='disks[]' \
+      --format='value(disks.boot,disks.autoDelete)'
+    echo
+    printf ' %q' "${clone_cmd[@]}"
+    echo
+  fi
+  if [[ -n "${MACHINE_IMAGE_NAME}" ]]; then
+    printf ' %q' \
+      gcloud compute machine-images describe "${MACHINE_IMAGE_NAME}" \
+      --project "${PROJECT_ID}" \
+      --format='value(name)'
+    echo
+    printf ' %q' "${machine_image_cmd[@]}"
+    echo
+  fi
 }
 
 normalize_lower() {
@@ -560,6 +659,12 @@ while [[ $# -gt 0 ]]; do
     --network) require_option_value "$1" "${2-}"; NETWORK="${2}"; shift 2 ;;
     --router-name) require_option_value "$1" "${2-}"; ROUTER_NAME="${2}"; shift 2 ;;
     --nat-name) require_option_value "$1" "${2-}"; NAT_NAME="${2}"; shift 2 ;;
+    --snapshot-policy-name) require_option_value "$1" "${2-}"; SNAPSHOT_POLICY_NAME="${2}"; shift 2 ;;
+    --snapshot-policy-disk) require_option_value "$1" "${2-}"; SNAPSHOT_POLICY_DISK="${2}"; shift 2 ;;
+    --snapshot-policy-disk-zone) require_option_value "$1" "${2-}"; SNAPSHOT_POLICY_DISK_ZONE="${2}"; shift 2 ;;
+    --clone-instance-name) require_option_value "$1" "${2-}"; CLONE_INSTANCE_NAME="${2}"; shift 2 ;;
+    --clone-zone) require_option_value "$1" "${2-}"; CLONE_ZONE="${2}"; shift 2 ;;
+    --machine-image-name) require_option_value "$1" "${2-}"; MACHINE_IMAGE_NAME="${2}"; shift 2 ;;
     --dry-run) DRY_RUN="true"; shift ;;
     --yes) ASSUME_YES="true"; shift ;;
     --interactive) NON_INTERACTIVE_MODE="false"; shift ;;
@@ -572,6 +677,21 @@ done
 resolve_interactive_mode
 resolve_project_id
 validate_zone_region_pair
+if [[ -n "${SNAPSHOT_POLICY_DISK}" && -z "${SNAPSHOT_POLICY_NAME}" ]]; then
+  die "--snapshot-policy-disk requires --snapshot-policy-name"
+fi
+if [[ -n "${SNAPSHOT_POLICY_DISK_ZONE}" && -z "${SNAPSHOT_POLICY_DISK}" ]]; then
+  die "--snapshot-policy-disk-zone requires --snapshot-policy-disk"
+fi
+if [[ -n "${SNAPSHOT_POLICY_DISK}" && -z "${SNAPSHOT_POLICY_DISK_ZONE}" ]]; then
+  SNAPSHOT_POLICY_DISK_ZONE="${ZONE}"
+fi
+if [[ -n "${CLONE_ZONE}" && -z "${CLONE_INSTANCE_NAME}" ]]; then
+  die "--clone-zone requires --clone-instance-name"
+fi
+if [[ -n "${CLONE_INSTANCE_NAME}" && -z "${CLONE_ZONE}" ]]; then
+  CLONE_ZONE="${ZONE}"
+fi
 DELETE_RESOURCE=(
   "instance:${INSTANCE_NAME}"
   "template:${TEMPLATE_NAME}"
