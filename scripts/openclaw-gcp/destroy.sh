@@ -532,6 +532,69 @@ qualify_nat_mode_gate() {
     "set NAT to all-subnet ranges mode and rerun"
 }
 
+qualify_snapshot_policy_attachment_gate() {
+  local output=""
+  local row=""
+  local policy_name=""
+  local rest=""
+  local row_count=0
+  local seen_names=""
+  local matched="false"
+
+  [[ -n "${SNAPSHOT_POLICY_NAME}" ]] || return 0
+  [[ -n "${SNAPSHOT_POLICY_DISK}" ]] || return 0
+
+  if ! output="$(
+    gcloud compute disks describe "${SNAPSHOT_POLICY_DISK}" \
+      --project "${PROJECT_ID}" \
+      --zone "${SNAPSHOT_POLICY_DISK_ZONE}" \
+      --flatten='resourcePolicies[]' \
+      --format='value(resourcePolicies.basename())' 2>/dev/null
+  )"; then
+    fail_qualification \
+      "snapshot-policy-attachment" \
+      "unable to describe disk ${SNAPSHOT_POLICY_DISK} in ${SNAPSHOT_POLICY_DISK_ZONE}" \
+      "verify snapshot disk name/zone/project and rerun"
+  fi
+
+  while IFS= read -r row; do
+    row="$(trim_space "${row}")"
+    [[ -n "${row}" ]] || continue
+    row_count=$((row_count + 1))
+
+    IFS=$'\t ' read -r policy_name rest <<<"${row}"
+    [[ -n "${policy_name}" ]] || fail_qualification \
+      "snapshot-policy-attachment" \
+      "empty policy row from disk describe output" \
+      "inspect resource policy attachment output and retry"
+    [[ -z "${rest}" ]] || fail_qualification \
+      "snapshot-policy-attachment" \
+      "ambiguous policy row format: ${row}" \
+      "inspect disk policy attachments and ensure the output is one policy name per row"
+
+    if [[ "${seen_names}" == *$'\n'"${policy_name}"$'\n'* ]]; then
+      fail_qualification \
+        "snapshot-policy-attachment" \
+        "duplicate policy row detected for ${policy_name}" \
+        "inspect disk resource policy attachments and remove ambiguous duplicates"
+    fi
+    seen_names+=$'\n'"${policy_name}"$'\n'
+    if [[ "${policy_name}" == "${SNAPSHOT_POLICY_NAME}" ]]; then
+      matched="true"
+    fi
+  done <<<"${output}"
+
+  (( row_count > 0 )) || fail_qualification \
+    "snapshot-policy-attachment" \
+    "disk describe output for resource policies is empty" \
+    "confirm the policy is attached to the named disk or rerun without disk context for delete-only mode"
+
+  [[ "${matched}" == "true" ]] || fail_qualification \
+    "snapshot-policy-attachment" \
+    "named policy ${SNAPSHOT_POLICY_NAME} is not attached to disk ${SNAPSHOT_POLICY_DISK}" \
+    "attach the policy to the named disk or use the intended policy/disk pair and rerun"
+}
+
 run_phase1_qualification_checks() {
   echo "Running Phase 1 qualification checks..."
   ensure_gcloud_available
@@ -539,6 +602,7 @@ run_phase1_qualification_checks() {
   qualify_template_metadata_gate
   qualify_router_network_gate
   qualify_nat_mode_gate
+  qualify_snapshot_policy_attachment_gate
   echo "Qualification checks passed."
 }
 
@@ -568,6 +632,58 @@ run_delete_step() {
     DELETE_STATUS[index]="failed"
     DELETE_DETAIL[index]="delete command exited with status ${exit_code}"
     DELETE_RETRY[index]="${retry_command}"
+    DELETE_ANY_FAILURE="true"
+  fi
+  DELETE_STEP_INDEX=$((DELETE_STEP_INDEX + 1))
+}
+
+execute_snapshot_policy_cleanup() {
+  local detach_cmd=()
+  local delete_cmd=()
+  local index="${DELETE_STEP_INDEX}"
+  local exit_code=0
+
+  [[ -n "${SNAPSHOT_POLICY_NAME}" ]] || return 0
+
+  delete_cmd=(
+    gcloud compute resource-policies delete "${SNAPSHOT_POLICY_NAME}"
+    --project "${PROJECT_ID}"
+    --region "${REGION}"
+    --quiet
+  )
+  detach_cmd=(
+    gcloud compute disks remove-resource-policies "${SNAPSHOT_POLICY_DISK}"
+    --project "${PROJECT_ID}"
+    --zone "${SNAPSHOT_POLICY_DISK_ZONE}"
+    --resource-policies "${SNAPSHOT_POLICY_NAME}"
+  )
+
+  printf 'Deleting %s...\n' "snapshot-policy:${SNAPSHOT_POLICY_NAME}"
+
+  if [[ -n "${SNAPSHOT_POLICY_DISK}" ]]; then
+    echo "Detaching snapshot policy ${SNAPSHOT_POLICY_NAME} from disk ${SNAPSHOT_POLICY_DISK}..."
+    if "${detach_cmd[@]}"; then
+      :
+    else
+      exit_code=$?
+      DELETE_STATUS[index]="failed"
+      DELETE_DETAIL[index]="detach command exited with status ${exit_code}"
+      DELETE_RETRY[index]="$(render_command_string "${detach_cmd[@]}")"
+      DELETE_ANY_FAILURE="true"
+      DELETE_STEP_INDEX=$((DELETE_STEP_INDEX + 1))
+      return
+    fi
+  fi
+
+  if "${delete_cmd[@]}"; then
+    DELETE_STATUS[index]="succeeded"
+    DELETE_DETAIL[index]="deleted successfully"
+    DELETE_RETRY[index]="$(render_command_string "${delete_cmd[@]}")"
+  else
+    exit_code=$?
+    DELETE_STATUS[index]="failed"
+    DELETE_DETAIL[index]="delete command exited with status ${exit_code}"
+    DELETE_RETRY[index]="$(render_command_string "${delete_cmd[@]}")"
     DELETE_ANY_FAILURE="true"
   fi
   DELETE_STEP_INDEX=$((DELETE_STEP_INDEX + 1))
@@ -613,7 +729,11 @@ print_teardown_summary() {
   local failed_count=0
 
   echo
-  echo "Phase 1 teardown summary:"
+  if [[ -n "${SNAPSHOT_POLICY_NAME}" ]]; then
+    echo "Teardown summary:"
+  else
+    echo "Phase 1 teardown summary:"
+  fi
   while (( i < ${#DELETE_RESOURCE[@]} )); do
     echo "  - ${DELETE_RESOURCE[i]} => ${DELETE_STATUS[i]} (${DELETE_DETAIL[i]})"
     if [[ "${DELETE_STATUS[i]}" == "failed" ]]; then
@@ -693,14 +813,24 @@ if [[ -n "${CLONE_INSTANCE_NAME}" && -z "${CLONE_ZONE}" ]]; then
   CLONE_ZONE="${ZONE}"
 fi
 DELETE_RESOURCE=(
+)
+if [[ -n "${SNAPSHOT_POLICY_NAME}" ]]; then
+  DELETE_RESOURCE+=("snapshot-policy:${SNAPSHOT_POLICY_NAME}")
+fi
+DELETE_RESOURCE+=(
   "instance:${INSTANCE_NAME}"
   "template:${TEMPLATE_NAME}"
   "nat:${NAT_NAME}"
   "router:${ROUTER_NAME}"
 )
-DELETE_STATUS=("skipped" "skipped" "skipped" "skipped")
-DELETE_DETAIL=("not attempted" "not attempted" "not attempted" "not attempted")
-DELETE_RETRY=("" "" "" "")
+DELETE_STATUS=()
+DELETE_DETAIL=()
+DELETE_RETRY=()
+for _ in "${DELETE_RESOURCE[@]}"; do
+  DELETE_STATUS+=("skipped")
+  DELETE_DETAIL+=("not attempted")
+  DELETE_RETRY+=("")
+done
 DELETE_ANY_FAILURE="false"
 DELETE_STEP_INDEX=0
 
@@ -715,6 +845,7 @@ fi
 
 run_phase1_qualification_checks
 require_typed_confirmation
+execute_snapshot_policy_cleanup
 execute_phase1_teardown
 print_teardown_summary
 
