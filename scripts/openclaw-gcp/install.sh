@@ -29,6 +29,8 @@ INSTALL_LOG_DIR_REMOTE="\$HOME/.openclaw-gcp/install-logs"
 INSTALL_LOG_LATEST_REMOTE="${INSTALL_LOG_DIR_REMOTE}/latest.log"
 INSTALL_LOG_HINT_LINES="200"
 UPSTREAM_INSTALL_CMD="curl -fsSL https://openclaw.ai/install.sh | bash"
+READINESS_SSH_MAX_ATTEMPTS="${OPENCLAW_READINESS_SSH_MAX_ATTEMPTS:-19}"
+READINESS_SSH_RETRY_DELAY_SECONDS="${OPENCLAW_READINESS_SSH_RETRY_DELAY_SECONDS:-10}"
 INSTANCE_REUSED="false"
 
 print_help() {
@@ -102,6 +104,12 @@ fail_install_handoff() {
   echo "Next steps: ${remedy}" >&2
   echo "Log retrieval hint: gcloud compute ssh ${INSTANCE_NAME} --project ${PROJECT_ID} --zone ${ZONE} --tunnel-through-iap --command \"bash -lc 'tail -n ${INSTALL_LOG_HINT_LINES} ${INSTALL_LOG_LATEST_REMOTE}'\"" >&2
   exit 1
+}
+
+readiness_ssh_error_is_retryable() {
+  local output="$1"
+  [[ "${output}" == *"Failed to lookup instance"* ]] ||
+    [[ "${output}" == *"Error during local connection to [stdin]"* ]]
 }
 
 validate_zone_region_pair() {
@@ -380,6 +388,10 @@ EOF
 }
 
 run_readiness_probe() {
+  local probe_output=""
+  local exit_code=0
+  local attempt=1
+
   build_readiness_ssh_cmd
   echo "Readiness gate: probing VM startup contract and host readiness."
   echo "Readiness log contract: ${READINESS_LOG_PATH}"
@@ -390,9 +402,35 @@ run_readiness_probe() {
     return 0
   fi
 
-  "${READINESS_SSH_CMD[@]}" || fail_readiness \
-    "remote readiness probe failed" \
-    "wait for startup to finish and rerun install.sh; if needed rerun ${REPAIR_BOOTSTRAP_SCRIPT} --run-now"
+  while true; do
+    set +e
+    probe_output="$("${READINESS_SSH_CMD[@]}" 2>&1)"
+    exit_code=$?
+    set -e
+
+    if [[ "${exit_code}" == "0" ]]; then
+      [[ -n "${probe_output}" ]] && printf '%s\n' "${probe_output}"
+      return 0
+    fi
+
+    if ! readiness_ssh_error_is_retryable "${probe_output}"; then
+      [[ -n "${probe_output}" ]] && printf '%s\n' "${probe_output}" >&2
+      fail_readiness \
+        "remote readiness probe failed" \
+        "wait for startup to finish and rerun install.sh; if needed rerun ${REPAIR_BOOTSTRAP_SCRIPT} --run-now"
+    fi
+
+    if (( attempt >= READINESS_SSH_MAX_ATTEMPTS )); then
+      [[ -n "${probe_output}" ]] && printf '%s\n' "${probe_output}" >&2
+      fail_readiness \
+        "remote readiness probe did not become reachable via IAP before timeout" \
+        "wait for IAP instance propagation to finish and rerun install.sh; if needed rerun ${REPAIR_BOOTSTRAP_SCRIPT} --run-now"
+    fi
+
+    echo "Readiness gate: instance not yet reachable through IAP SSH (attempt ${attempt}/${READINESS_SSH_MAX_ATTEMPTS}); retrying in ${READINESS_SSH_RETRY_DELAY_SECONDS}s."
+    attempt=$((attempt + 1))
+    sleep "${READINESS_SSH_RETRY_DELAY_SECONDS}"
+  done
 }
 
 run_readiness_gate() {

@@ -97,6 +97,7 @@ new_mock_env() {
 set -euo pipefail
 LOG_FILE="${MOCK_GCLOUD_LOG:?}"
 METADATA_STATE_FILE="${MOCK_METADATA_STATE_FILE:-${LOG_FILE}.metadata}"
+SSH_ATTEMPT_STATE_FILE="${MOCK_SSH_ATTEMPT_STATE_FILE:-${LOG_FILE}.ssh_attempts}"
 printf 'GCLOUD %s\n' "$*" >>"${LOG_FILE}"
 
 metadata_default_value() {
@@ -200,6 +201,22 @@ if [[ "$*" == *"compute firewall-rules list"* ]]; then
   fi
   printf '%b\n' "allow-iap-ssh\tINGRESS\tFalse\t35.235.240.0/20\ttcp:22"
   exit 0
+fi
+
+if [[ "$*" == *"compute ssh"* ]] && [[ "$*" == *"readiness-gate.log"* ]] && [[ -n "${MOCK_READINESS_SSH_FAIL_COUNT:-}" ]]; then
+  attempt_count="0"
+  if [[ -f "${SSH_ATTEMPT_STATE_FILE}" ]]; then
+    attempt_count="$(cat "${SSH_ATTEMPT_STATE_FILE}")"
+  fi
+  attempt_count=$((attempt_count + 1))
+  printf '%s\n' "${attempt_count}" >"${SSH_ATTEMPT_STATE_FILE}"
+  if (( attempt_count <= MOCK_READINESS_SSH_FAIL_COUNT )); then
+    cat >&2 <<'SSH_RETRY_EOF'
+ERROR: [0] Error during local connection to [stdin]: Error while connecting [4047: 'Failed to lookup instance'].
+Connection closed by UNKNOWN port 65535
+SSH_RETRY_EOF
+    exit 255
+  fi
 fi
 
 if [[ "$*" == *"compute ssh"* ]] && [[ "${MOCK_SSH_FAIL:-false}" == "true" ]]; then
@@ -773,6 +790,32 @@ test_install_readiness_gate_dry_run_contract() {
   assert_not_contains "${RUN_OUTPUT}" "pgrep\\ -f\\ \"apt-get\\|apt.systemd.daily\\|unattended-upgrade\\|dpkg\"" "install.sh readiness probe no longer uses broad process-name matching"
 }
 
+test_install_readiness_probe_retries_fresh_vm_iap_lookup_delay() {
+  local mock_dir
+  local log_content
+  mock_dir="$(new_mock_env install-readiness-retry)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_READINESS_SSH_FAIL_COUNT=2 \
+    OPENCLAW_READINESS_SSH_MAX_ATTEMPTS=4 \
+    OPENCLAW_READINESS_SSH_RETRY_DELAY_SECONDS=0 \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --zone asia-southeast1-a
+
+  assert_status 0 "install.sh retries transient fresh-VM IAP lookup failures"
+  assert_contains "${RUN_OUTPUT}" "Readiness gate: instance not yet reachable through IAP SSH (attempt 1/4); retrying in 0s." "install.sh reports first transient readiness retry"
+  assert_contains "${RUN_OUTPUT}" "Readiness gate: instance not yet reachable through IAP SSH (attempt 2/4); retrying in 0s." "install.sh reports second transient readiness retry"
+  assert_contains "${RUN_OUTPUT}" "Readiness gate passed." "install.sh eventually passes readiness after transient IAP delay"
+  assert_contains "${RUN_OUTPUT}" "Interactive SSH handoff stage: launching upstream installer." "install.sh continues to handoff after readiness retries succeed"
+
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_contains "${log_content}" "GCLOUD compute ssh oc-main --project hoangnb-openclaw --zone asia-southeast1-a --tunnel-through-iap --command" "install.sh emits readiness SSH command during retry flow"
+}
+
 test_install_firewall_preflight_predicate() {
   local mock_dir
   mock_dir="$(new_mock_env install-firewall-predicate)"
@@ -1315,6 +1358,7 @@ main() {
   test_install_parser_missing_value_guard
   test_install_prompt_and_nonprompt_behavior
   test_install_readiness_gate_dry_run_contract
+  test_install_readiness_probe_retries_fresh_vm_iap_lookup_delay
   test_install_firewall_preflight_predicate
   test_install_cross_zone_existing_instance_guard
   test_install_reuse_eligibility_guardrails
