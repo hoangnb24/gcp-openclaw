@@ -2,7 +2,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BOOTSTRAP_SCRIPT="${SCRIPT_DIR}/bootstrap-openclaw.sh"
+BOOTSTRAP_SCRIPT="${SCRIPT_DIR}/bootstrap-vm-prereqs.sh"
+STARTUP_SCRIPT_SOURCE="embedded-vm-prereqs-v1"
+STARTUP_PROFILE="vm-prereqs-v1"
+STARTUP_CONTRACT_VERSION="startup-ready-v1"
+STARTUP_READY_SENTINEL="/var/lib/openclaw/startup-ready-v1"
+READINESS_LOG_PATH="/var/log/openclaw/readiness-gate.log"
 
 PROJECT_ID=""
 INSTANCE_NAME=""
@@ -17,14 +22,14 @@ print_help() {
   cat <<EOF
 Usage: $(basename "$0") [options]
 
-Update an existing VM's startup metadata to the current OpenClaw bootstrap and optionally rerun it immediately.
+Update an existing VM's startup metadata to the current VM prerequisites bootstrap and optionally rerun it immediately.
 
 Options:
   --project-id <id>        GCP project ID (required)
   --instance-name <name>   VM instance name (required)
   --zone <zone>            VM zone (default: ${ZONE})
-  --openclaw-image <img>   OpenClaw image metadata value (default: ${OPENCLAW_IMAGE})
-  --openclaw-tag <tag>     OpenClaw tag metadata value (required)
+  --openclaw-image <img>   Legacy metadata compatibility value (default: ${OPENCLAW_IMAGE})
+  --openclaw-tag <tag>     Legacy metadata compatibility value (optional)
   --run-now                Rerun the startup script immediately over SSH
   --no-tunnel-through-iap  Do not use IAP when rerunning remotely
   --dry-run                Print commands only
@@ -41,6 +46,14 @@ require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
     die "required command not found: $1"
   fi
+}
+
+validate_metadata_value() {
+  local field_name="$1"
+  local field_value="$2"
+  [[ "${field_value}" != *","* ]] || die "${field_name} must not contain ',' because it is persisted in metadata"
+  [[ "${field_value}" != *"="* ]] || die "${field_name} must not contain '=' because it is persisted in metadata"
+  [[ "${field_value}" != *$'\n'* ]] || die "${field_name} must not contain newlines"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -60,18 +73,43 @@ done
 
 [[ -n "${PROJECT_ID}" ]] || die "--project-id is required"
 [[ -n "${INSTANCE_NAME}" ]] || die "--instance-name is required"
-[[ -n "${OPENCLAW_TAG}" ]] || die "--openclaw-tag is required"
 [[ -f "${BOOTSTRAP_SCRIPT}" ]] || die "missing bootstrap script: ${BOOTSTRAP_SCRIPT}"
+[[ -n "${OPENCLAW_IMAGE}" ]] || die "--openclaw-image cannot be empty"
+
+validate_metadata_value "openclaw_image" "${OPENCLAW_IMAGE}"
+if [[ -n "${OPENCLAW_TAG}" ]]; then
+  validate_metadata_value "openclaw_tag" "${OPENCLAW_TAG}"
+fi
+validate_metadata_value "startup_script_source" "${STARTUP_SCRIPT_SOURCE}"
+validate_metadata_value "startup_profile" "${STARTUP_PROFILE}"
+validate_metadata_value "startup_contract_version" "${STARTUP_CONTRACT_VERSION}"
+validate_metadata_value "startup_ready_sentinel" "${STARTUP_READY_SENTINEL}"
+validate_metadata_value "readiness_log_path" "${READINESS_LOG_PATH}"
 
 if [[ "${DRY_RUN}" != "true" ]]; then
   require_command gcloud
 fi
 
+METADATA_ENTRIES=(
+  "startup_script_source=${STARTUP_SCRIPT_SOURCE}"
+  "startup_profile=${STARTUP_PROFILE}"
+  "startup_contract_version=${STARTUP_CONTRACT_VERSION}"
+  "startup_ready_sentinel=${STARTUP_READY_SENTINEL}"
+  "readiness_log_path=${READINESS_LOG_PATH}"
+)
+if [[ -n "${OPENCLAW_IMAGE}" ]]; then
+  METADATA_ENTRIES+=("legacy_openclaw_image=${OPENCLAW_IMAGE}")
+fi
+if [[ -n "${OPENCLAW_TAG}" ]]; then
+  METADATA_ENTRIES+=("legacy_openclaw_tag=${OPENCLAW_TAG}")
+fi
+METADATA_STRING="$(IFS=,; printf '%s' "${METADATA_ENTRIES[*]}")"
+
 METADATA_CMD=(
   gcloud compute instances add-metadata "${INSTANCE_NAME}"
   --project "${PROJECT_ID}"
   --zone "${ZONE}"
-  --metadata "openclaw_image=${OPENCLAW_IMAGE},openclaw_tag=${OPENCLAW_TAG},startup_script_source=embedded-openclaw-bootstrap-v10"
+  --metadata "${METADATA_STRING}"
   --metadata-from-file "startup-script=${BOOTSTRAP_SCRIPT}"
 )
 
@@ -91,6 +129,11 @@ echo "Repair inputs:"
 echo "  project_id: ${PROJECT_ID}"
 echo "  instance_name: ${INSTANCE_NAME}"
 echo "  zone: ${ZONE}"
+echo "  startup_script_source: ${STARTUP_SCRIPT_SOURCE}"
+echo "  startup_profile: ${STARTUP_PROFILE}"
+echo "  startup_contract_version: ${STARTUP_CONTRACT_VERSION}"
+echo "  startup_ready_sentinel: ${STARTUP_READY_SENTINEL}"
+echo "  readiness_log_path: ${READINESS_LOG_PATH}"
 echo "  openclaw_image: ${OPENCLAW_IMAGE}"
 echo "  openclaw_tag: ${OPENCLAW_TAG}"
 echo "  run_now: ${RUN_NOW}"

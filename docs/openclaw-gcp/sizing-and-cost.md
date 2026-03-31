@@ -1,6 +1,7 @@
 # Sizing And Cost Baselines
 
 This note captures the operating baseline for OpenClaw on GCP and the size-up rules that match the repository defaults.
+Provisioning entrypoint for this baseline is `bash scripts/openclaw-gcp/install.sh`.
 
 Reference materials:
 

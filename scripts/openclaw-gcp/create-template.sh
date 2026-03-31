@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-BOOTSTRAP_SCRIPT_TEMPLATE="${SCRIPT_DIR}/bootstrap-openclaw.sh"
+BOOTSTRAP_SCRIPT_TEMPLATE="${SCRIPT_DIR}/bootstrap-vm-prereqs.sh"
 
 PROJECT_ID=""
 TEMPLATE_NAME="oc-template"
@@ -21,6 +21,9 @@ STARTUP_SCRIPT_FILE=""
 STARTUP_SCRIPT_URL=""
 STARTUP_SCRIPT_SHA256=""
 STARTUP_SCRIPT_MODE="embedded"
+STARTUP_PROFILE="vm-prereqs-v1"
+STARTUP_CONTRACT_VERSION="startup-ready-v1"
+STARTUP_READY_SENTINEL="/var/lib/openclaw/startup-ready-v1"
 SERVICE_ACCOUNT=""
 SCOPES=""
 NO_SERVICE_ACCOUNT="false"
@@ -43,8 +46,8 @@ Defaults:
   region:       ${REGION}
   zone:         ${ZONE}
   image family: ${IMAGE_FAMILY} (project ${IMAGE_PROJECT})
-  OpenClaw image: ${OPENCLAW_IMAGE}
-  OpenClaw tag:   ${OPENCLAW_TAG} (must be overridden)
+  OpenClaw image: ${OPENCLAW_IMAGE} (legacy metadata compatibility)
+  OpenClaw tag:   ${OPENCLAW_TAG} (must be overridden for legacy metadata compatibility)
 
 Options:
   --project-id <id>             GCP project ID (required)
@@ -57,8 +60,8 @@ Options:
   --image-project <project>     Image project (default: ${IMAGE_PROJECT})
   --image-family <family>       Image family to resolve (default: ${IMAGE_FAMILY})
   --image-name <name>           Explicit image name (overrides family resolution)
-  --openclaw-image <image>      OpenClaw container image (default: ${OPENCLAW_IMAGE})
-  --openclaw-tag <tag>          OpenClaw image tag (required; no secrets)
+  --openclaw-image <image>      Legacy metadata compatibility value (default: ${OPENCLAW_IMAGE})
+  --openclaw-tag <tag>          Legacy metadata compatibility value (required; no secrets)
   --startup-script-file <path>  Local startup script source
   --startup-script-url <url>    Remote startup script source
   --startup-script-sha256 <hex> Required SHA-256 when using --startup-script-url
@@ -238,7 +241,7 @@ fi
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 STARTUP_SCRIPT_PATH="${WORK_DIR}/startup-script.sh"
-STARTUP_SCRIPT_SOURCE="embedded-openclaw-bootstrap-v10"
+STARTUP_SCRIPT_SOURCE="embedded-vm-prereqs-v1"
 STARTUP_SCRIPT_DIGEST=""
 
 if [[ -n "${STARTUP_SCRIPT_FILE}" ]]; then
@@ -246,11 +249,17 @@ if [[ -n "${STARTUP_SCRIPT_FILE}" ]]; then
   cp "${STARTUP_SCRIPT_FILE}" "${STARTUP_SCRIPT_PATH}"
   STARTUP_SCRIPT_DIGEST="$(sha256_of_file "${STARTUP_SCRIPT_PATH}")"
   STARTUP_SCRIPT_MODE="file"
+  STARTUP_PROFILE="custom-startup-script"
+  STARTUP_CONTRACT_VERSION="custom-startup-script"
+  STARTUP_READY_SENTINEL="custom-startup-script"
   STARTUP_SCRIPT_SOURCE="file-sha256:${STARTUP_SCRIPT_DIGEST,,}"
 elif [[ -n "${STARTUP_SCRIPT_URL}" ]]; then
   if [[ "${DRY_RUN}" == "true" ]]; then
     STARTUP_SCRIPT_MODE="url"
     STARTUP_SCRIPT_DIGEST="${STARTUP_SCRIPT_SHA256,,}"
+    STARTUP_PROFILE="custom-startup-script"
+    STARTUP_CONTRACT_VERSION="custom-startup-script"
+    STARTUP_READY_SENTINEL="custom-startup-script"
     STARTUP_SCRIPT_SOURCE="url-sha256:${STARTUP_SCRIPT_DIGEST}"
     write_embedded_startup_script "${STARTUP_SCRIPT_PATH}"
   else
@@ -260,6 +269,9 @@ elif [[ -n "${STARTUP_SCRIPT_URL}" ]]; then
     [[ "${ACTUAL_STARTUP_SHA256,,}" == "${STARTUP_SCRIPT_SHA256,,}" ]] || die "startup script SHA-256 mismatch for ${STARTUP_SCRIPT_URL}"
     STARTUP_SCRIPT_MODE="url"
     STARTUP_SCRIPT_DIGEST="${STARTUP_SCRIPT_SHA256,,}"
+    STARTUP_PROFILE="custom-startup-script"
+    STARTUP_CONTRACT_VERSION="custom-startup-script"
+    STARTUP_READY_SENTINEL="custom-startup-script"
     STARTUP_SCRIPT_SOURCE="url-sha256:${STARTUP_SCRIPT_DIGEST}"
   fi
 else
@@ -280,6 +292,9 @@ mkdir -p "$(dirname "${RESOLUTION_RECORD}")"
 validate_metadata_value "openclaw_image" "${OPENCLAW_IMAGE}"
 validate_metadata_value "openclaw_tag" "${OPENCLAW_TAG}"
 validate_metadata_value "startup_script_source" "${STARTUP_SCRIPT_SOURCE}"
+validate_metadata_value "startup_profile" "${STARTUP_PROFILE}"
+validate_metadata_value "startup_contract_version" "${STARTUP_CONTRACT_VERSION}"
+validate_metadata_value "startup_ready_sentinel" "${STARTUP_READY_SENTINEL}"
 validate_metadata_value "debian_image_resolved" "${RESOLVED_IMAGE_NAME}"
 if [[ -n "${SERVICE_ACCOUNT}" ]]; then
   validate_metadata_value "service_account" "${SERVICE_ACCOUNT}"
@@ -296,11 +311,25 @@ openclaw_image=${OPENCLAW_IMAGE}
 openclaw_tag=${OPENCLAW_TAG}
 startup_script_mode=${STARTUP_SCRIPT_MODE}
 startup_script_source=${STARTUP_SCRIPT_SOURCE}
+startup_profile=${STARTUP_PROFILE}
+startup_contract_version=${STARTUP_CONTRACT_VERSION}
+startup_ready_sentinel=${STARTUP_READY_SENTINEL}
 startup_script_sha256=${STARTUP_SCRIPT_DIGEST}
 identity_mode=$([[ "${NO_SERVICE_ACCOUNT}" == "true" ]] && echo "no-service-account" || echo "service-account")
 service_account=${SERVICE_ACCOUNT}
 scopes=${SCOPES}
 EOF
+
+METADATA_ENTRIES=(
+  "openclaw_image=${OPENCLAW_IMAGE}"
+  "openclaw_tag=${OPENCLAW_TAG}"
+  "startup_script_source=${STARTUP_SCRIPT_SOURCE}"
+  "startup_profile=${STARTUP_PROFILE}"
+  "startup_contract_version=${STARTUP_CONTRACT_VERSION}"
+  "startup_ready_sentinel=${STARTUP_READY_SENTINEL}"
+  "debian_image_resolved=${RESOLVED_IMAGE_NAME}"
+)
+METADATA_STRING="$(IFS=,; printf '%s' "${METADATA_ENTRIES[*]}")"
 
 CMD=(
   gcloud compute instance-templates create "${TEMPLATE_NAME}"
@@ -311,7 +340,7 @@ CMD=(
   --boot-disk-size "${DISK_SIZE_GB}GB"
   --image "${RESOLVED_IMAGE_NAME}"
   --image-project "${IMAGE_PROJECT}"
-  --metadata "openclaw_image=${OPENCLAW_IMAGE},openclaw_tag=${OPENCLAW_TAG},startup_script_source=${STARTUP_SCRIPT_SOURCE},debian_image_resolved=${RESOLVED_IMAGE_NAME}"
+  --metadata "${METADATA_STRING}"
   --metadata-from-file "startup-script=${STARTUP_SCRIPT_PATH}"
 )
 
@@ -333,6 +362,9 @@ echo "  disk: ${DISK_TYPE} ${DISK_SIZE_GB} GiB"
 echo "  image_name: ${RESOLVED_IMAGE_NAME}"
 echo "  image_self_link: ${RESOLVED_IMAGE_LINK}"
 echo "  startup_script_source: ${STARTUP_SCRIPT_SOURCE}"
+echo "  startup_profile: ${STARTUP_PROFILE}"
+echo "  startup_contract_version: ${STARTUP_CONTRACT_VERSION}"
+echo "  startup_ready_sentinel: ${STARTUP_READY_SENTINEL}"
 echo "  openclaw_image: ${OPENCLAW_IMAGE}"
 echo "  openclaw_tag: ${OPENCLAW_TAG}"
 echo "  identity_mode: $([[ "${NO_SERVICE_ACCOUNT}" == "true" ]] && echo "no-service-account" || echo "service-account")"

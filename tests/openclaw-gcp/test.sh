@@ -63,6 +63,31 @@ assert_not_contains() {
   fi
 }
 
+assert_ordered_line_patterns() {
+  local text="$1"
+  local first_pattern="$2"
+  local second_pattern="$3"
+  local message="$4"
+  local first_line=""
+  local second_line=""
+
+  first_line="$(printf '%s\n' "${text}" | grep -n "${first_pattern}" | head -n1 | cut -d: -f1 || true)"
+  second_line="$(printf '%s\n' "${text}" | grep -n "${second_pattern}" | head -n1 | cut -d: -f1 || true)"
+
+  if [[ -z "${first_line}" || -z "${second_line}" ]]; then
+    fail "${message} (missing pattern)"
+    printf '%s\n' "${text}"
+    return
+  fi
+
+  if (( first_line < second_line )); then
+    pass "${message}"
+  else
+    fail "${message} (order mismatch: ${first_pattern} should precede ${second_pattern})"
+    printf '%s\n' "${text}"
+  fi
+}
+
 new_mock_env() {
   local name="$1"
   local dir="${TMP_DIR}/${name}"
@@ -71,10 +96,148 @@ new_mock_env() {
 #!/usr/bin/env bash
 set -euo pipefail
 LOG_FILE="${MOCK_GCLOUD_LOG:?}"
+METADATA_STATE_FILE="${MOCK_METADATA_STATE_FILE:-${LOG_FILE}.metadata}"
+SSH_ATTEMPT_STATE_FILE="${MOCK_SSH_ATTEMPT_STATE_FILE:-${LOG_FILE}.ssh_attempts}"
 printf 'GCLOUD %s\n' "$*" >>"${LOG_FILE}"
+
+metadata_default_value() {
+  case "$1" in
+    startup_script_source) printf '%s\n' "${MOCK_STARTUP_SCRIPT_SOURCE:-embedded-vm-prereqs-v1}" ;;
+    startup_profile) printf '%s\n' "${MOCK_STARTUP_PROFILE:-vm-prereqs-v1}" ;;
+    startup_contract_version) printf '%s\n' "${MOCK_STARTUP_CONTRACT_VERSION:-startup-ready-v1}" ;;
+    startup_ready_sentinel) printf '%s\n' "${MOCK_STARTUP_READY_SENTINEL:-/var/lib/openclaw/startup-ready-v1}" ;;
+    readiness_log_path) printf '%s\n' "${MOCK_READINESS_LOG_PATH:-/var/log/openclaw/readiness-gate.log}" ;;
+    openclaw_image) printf '%s\n' "${MOCK_OPENCLAW_IMAGE:-ghcr.io/openclawai/gateway}" ;;
+    openclaw_tag) printf '%s\n' "${MOCK_OPENCLAW_TAG:-2026.3.23}" ;;
+    legacy_openclaw_image) printf '%s\n' "${MOCK_LEGACY_OPENCLAW_IMAGE:-}" ;;
+    legacy_openclaw_tag) printf '%s\n' "${MOCK_LEGACY_OPENCLAW_TAG:-}" ;;
+    *) printf '%s\n' "" ;;
+  esac
+}
+
+metadata_current_value() {
+  local key="$1"
+  if [[ -f "${METADATA_STATE_FILE}" ]]; then
+    local line
+    line="$(awk -F '\t' -v key="${key}" '$1 == key { print $2; exit }' "${METADATA_STATE_FILE}")"
+    if [[ -n "${line}" ]]; then
+      printf '%s\n' "${line}"
+      return
+    fi
+  fi
+  metadata_default_value "${key}"
+}
+
+write_metadata_state() {
+  local metadata_string="$1"
+  : >"${METADATA_STATE_FILE}"
+  local pair key value
+  IFS=',' read -r -a metadata_pairs <<<"${metadata_string}"
+  for pair in "${metadata_pairs[@]}"; do
+    key="${pair%%=*}"
+    value="${pair#*=}"
+    printf '%s\t%s\n' "${key}" "${value}" >>"${METADATA_STATE_FILE}"
+  done
+}
 
 if [[ "$*" == *"compute images describe-from-family"* ]]; then
   printf '%s\n' "${MOCK_IMAGE_NAME:-debian-12-bookworm-v20260310}"
+  exit 0
+fi
+
+if [[ "$*" == *"config get-value project"* ]]; then
+  printf '%s\n' "${MOCK_PROJECT_ID:-hoangnb-openclaw}"
+  exit 0
+fi
+
+if [[ "$*" == *"auth list"* && "$*" == *"--filter=status:ACTIVE"* ]]; then
+  printf '%s\n' "${MOCK_ACTIVE_ACCOUNT:-operator@example.com}"
+  exit 0
+fi
+
+if [[ "$*" == *"projects describe"* && "$*" == *"--format=value(projectId)"* ]]; then
+  for ((i=1; i <= $#; i++)); do
+    if [[ "${!i}" == "describe" ]]; then
+      next=$((i + 1))
+      printf '%s\n' "${!next}"
+      exit 0
+    fi
+  done
+  printf '%s\n' "${MOCK_PROJECT_ID:-hoangnb-openclaw}"
+  exit 0
+fi
+
+if [[ "$*" == *"services list"* && "$*" == *"config.name=compute.googleapis.com"* ]]; then
+  printf '%s\n' "compute.googleapis.com"
+  exit 0
+fi
+
+if [[ "$*" == *"services list"* && "$*" == *"config.name=iap.googleapis.com"* ]]; then
+  printf '%s\n' "iap.googleapis.com"
+  exit 0
+fi
+
+if [[ "$*" == *"compute zones describe"* && "$*" == *"--format=value(region.basename())"* ]]; then
+  zone=""
+  for ((i=1; i <= $#; i++)); do
+    if [[ "${!i}" == "describe" ]]; then
+      next=$((i + 1))
+      zone="${!next}"
+      break
+    fi
+  done
+  if [[ -z "${zone}" ]]; then
+    printf '%s\n' "${MOCK_ZONE_REGION:-asia-southeast1}"
+    exit 0
+  fi
+  printf '%s\n' "${zone%-*}"
+  exit 0
+fi
+
+if [[ "$*" == *"compute firewall-rules list"* ]]; then
+  if [[ -n "${MOCK_FIREWALL_RULE_LINES:-}" ]]; then
+    printf '%b\n' "${MOCK_FIREWALL_RULE_LINES}"
+    exit 0
+  fi
+  printf '%b\n' "allow-iap-ssh\tINGRESS\tFalse\t35.235.240.0/20\ttcp:22"
+  exit 0
+fi
+
+if [[ "$*" == *"compute ssh"* ]] && [[ "$*" == *"readiness-gate.log"* ]] && [[ -n "${MOCK_READINESS_SSH_FAIL_COUNT:-}" ]]; then
+  attempt_count="0"
+  if [[ -f "${SSH_ATTEMPT_STATE_FILE}" ]]; then
+    attempt_count="$(cat "${SSH_ATTEMPT_STATE_FILE}")"
+  fi
+  attempt_count=$((attempt_count + 1))
+  printf '%s\n' "${attempt_count}" >"${SSH_ATTEMPT_STATE_FILE}"
+  if (( attempt_count <= MOCK_READINESS_SSH_FAIL_COUNT )); then
+    cat >&2 <<'SSH_RETRY_EOF'
+ERROR: [0] Error during local connection to [stdin]: Error while connecting [4047: 'Failed to lookup instance'].
+Connection closed by UNKNOWN port 65535
+SSH_RETRY_EOF
+    exit 255
+  fi
+fi
+
+if [[ "$*" == *"compute ssh"* ]] && [[ "${MOCK_SSH_FAIL:-false}" == "true" ]]; then
+  echo "mocked ssh failure" >&2
+  exit 73
+fi
+
+if [[ "$*" == *"compute ssh"* ]] && [[ "${MOCK_SSH_FAIL_HANDOFF:-false}" == "true" ]] && [[ "$*" == *"openclaw.ai/install.sh"* ]]; then
+  echo "mocked ssh failure" >&2
+  exit 73
+fi
+
+if [[ "$*" == *"compute instances list"* && "$*" == *"--format=value(zone.basename())"* ]]; then
+  if [[ -n "${MOCK_INSTANCE_EXISTING_ZONE:-}" ]]; then
+    printf '%s\n' "${MOCK_INSTANCE_EXISTING_ZONE}"
+    exit 0
+  fi
+  if [[ "${MOCK_INSTANCE_EXISTS:-false}" == "true" ]]; then
+    printf '%s\n' "${MOCK_INSTANCE_ZONE:-asia-southeast1-a}"
+    exit 0
+  fi
   exit 0
 fi
 
@@ -100,6 +263,20 @@ if [[ "$*" == *"compute images describe"* && "$*" == *"--format=value(selfLink)"
 fi
 
 if [[ "$*" == *"compute instance-templates describe"* ]]; then
+  if [[ "$*" == *"--flatten=properties.metadata.items[]"* && "$*" == *"--format=value(properties.metadata.items.key,properties.metadata.items.value)"* ]]; then
+    if [[ "${MOCK_DESTROY_TEMPLATE_DESCRIBE_FAIL:-false}" == "true" ]]; then
+      exit 1
+    fi
+    if [[ -n "${MOCK_DESTROY_TEMPLATE_METADATA_LINES:-}" ]]; then
+      printf '%b\n' "${MOCK_DESTROY_TEMPLATE_METADATA_LINES}"
+      exit 0
+    fi
+    printf 'startup_script_source\t%s\n' "${MOCK_DESTROY_STARTUP_SCRIPT_SOURCE:-embedded-vm-prereqs-v1}"
+    printf 'startup_profile\t%s\n' "${MOCK_DESTROY_STARTUP_PROFILE:-vm-prereqs-v1}"
+    printf 'startup_contract_version\t%s\n' "${MOCK_DESTROY_STARTUP_CONTRACT_VERSION:-startup-ready-v1}"
+    printf 'startup_ready_sentinel\t%s\n' "${MOCK_DESTROY_STARTUP_READY_SENTINEL:-/var/lib/openclaw/startup-ready-v1}"
+    exit 0
+  fi
   if [[ "$*" == *"accessConfigs"* ]]; then
     if [[ "${MOCK_TEMPLATE_HAS_EXTERNAL_IP:-false}" == "true" ]]; then
       printf '%s\n' "External NAT"
@@ -114,6 +291,84 @@ if [[ "$*" == *"compute instance-templates describe"* ]]; then
   exit 1
 fi
 
+if [[ "$*" == *"compute instances describe"* && "$*" == *"--format=value(name)"* ]]; then
+  if [[ "${MOCK_INSTANCE_EXISTS:-false}" == "true" ]]; then
+    for ((i=1; i <= $#; i++)); do
+      if [[ "${!i}" == "describe" ]]; then
+        next=$((i + 1))
+        printf '%s\n' "${!next}"
+        exit 0
+      fi
+    done
+    printf '%s\n' "${MOCK_INSTANCE_NAME:-oc-main}"
+    exit 0
+  fi
+  exit 1
+fi
+
+if [[ "$*" == *"compute instances describe"* && "$*" == *"--flatten=metadata.items[]"* && "$*" == *"--format=value(metadata.items.key,metadata.items.value)"* ]]; then
+  for metadata_key in \
+    startup_script_source \
+    startup_profile \
+    startup_contract_version \
+    startup_ready_sentinel \
+    readiness_log_path \
+    openclaw_image \
+    openclaw_tag \
+    legacy_openclaw_image \
+    legacy_openclaw_tag; do
+    printf '%s\t%s\n' "${metadata_key}" "$(metadata_current_value "${metadata_key}")"
+  done
+  exit 0
+fi
+
+if [[ "$*" == *"compute instances describe"* && "$*" == *"--flatten=disks[]"* && "$*" == *"--format=value(disks.boot,disks.autoDelete)"* ]]; then
+  describe_instance=""
+  for ((i=1; i <= $#; i++)); do
+    if [[ "${!i}" == "describe" ]]; then
+      next=$((i + 1))
+      describe_instance="${!next}"
+      break
+    fi
+  done
+  if [[ "${describe_instance}" == "${MOCK_CLONE_INSTANCE_NAME:-oc-clone}" ]]; then
+    if [[ "${MOCK_DESTROY_CLONE_DESCRIBE_FAIL:-false}" == "true" ]]; then
+      exit 1
+    fi
+    if [[ -n "${MOCK_DESTROY_CLONE_DISK_ROWS:-}" ]]; then
+      printf '%b\n' "${MOCK_DESTROY_CLONE_DISK_ROWS}"
+      exit 0
+    fi
+    printf '%s\n' "true true"
+    exit 0
+  fi
+  if [[ "${MOCK_DESTROY_INSTANCE_DESCRIBE_FAIL:-false}" == "true" ]]; then
+    exit 1
+  fi
+  if [[ -n "${MOCK_DESTROY_DISK_ROWS:-}" ]]; then
+    printf '%b\n' "${MOCK_DESTROY_DISK_ROWS}"
+    exit 0
+  fi
+  printf '%s\n' "true true"
+  exit 0
+fi
+
+if [[ "$*" == *"compute instances add-metadata"* ]]; then
+  metadata_string=""
+  for ((i=1; i <= $#; i++)); do
+    if [[ "${!i}" == "--metadata" ]]; then
+      next=$((i + 1))
+      metadata_string="${!next}"
+      break
+    fi
+  done
+  if [[ -n "${metadata_string}" ]]; then
+    write_metadata_state "${metadata_string}"
+  fi
+  printf 'Updated [%s]\n' "https://www.googleapis.com/compute/v1/projects/${MOCK_PROJECT_ID:-hoangnb-openclaw}/zones/${MOCK_INSTANCE_ZONE:-asia-southeast1-a}/instances/${MOCK_INSTANCE_NAME:-oc-main}"
+  exit 0
+fi
+
 if [[ "$*" == *"compute resource-policies describe"* ]]; then
   if [[ "${MOCK_POLICY_EXISTS:-false}" == "true" ]]; then
     printf '%s\n' "${MOCK_POLICY_NAME:-oc-daily-snapshots}"
@@ -122,7 +377,30 @@ if [[ "$*" == *"compute resource-policies describe"* ]]; then
   exit 1
 fi
 
+if [[ "$*" == *"compute disks describe"* && "$*" == *"--flatten=resourcePolicies[]"* && "$*" == *"--format=value(resourcePolicies.basename())"* ]]; then
+  if [[ "${MOCK_DESTROY_SNAPSHOT_DISK_DESCRIBE_FAIL:-false}" == "true" ]]; then
+    exit 1
+  fi
+  if [[ -n "${MOCK_DESTROY_SNAPSHOT_POLICY_ROWS:-}" ]]; then
+    printf '%b\n' "${MOCK_DESTROY_SNAPSHOT_POLICY_ROWS}"
+    exit 0
+  fi
+  printf '%s\n' "${MOCK_DESTROY_SNAPSHOT_POLICY_NAME:-oc-daily-snapshots}"
+  exit 0
+fi
+
 if [[ "$*" == *"compute routers describe"* ]]; then
+  if [[ "$*" == *"--format=value(network.basename())"* ]]; then
+    if [[ "${MOCK_DESTROY_ROUTER_DESCRIBE_FAIL:-false}" == "true" ]]; then
+      exit 1
+    fi
+    if [[ -n "${MOCK_DESTROY_ROUTER_NETWORK_ROWS:-}" ]]; then
+      printf '%b\n' "${MOCK_DESTROY_ROUTER_NETWORK_ROWS}"
+      exit 0
+    fi
+    printf '%s\n' "${MOCK_DESTROY_ROUTER_NETWORK:-default}"
+    exit 0
+  fi
   if [[ "${MOCK_ROUTER_EXISTS:-false}" == "true" ]]; then
     printf '%s\n' "${MOCK_ROUTER_NAME:-oc-router}"
     exit 0
@@ -131,11 +409,86 @@ if [[ "$*" == *"compute routers describe"* ]]; then
 fi
 
 if [[ "$*" == *"compute routers nats describe"* ]]; then
+  if [[ "$*" == *"--format=value(natIpAllocateOption,sourceSubnetworkIpRangesToNat)"* ]]; then
+    if [[ "${MOCK_DESTROY_NAT_DESCRIBE_FAIL:-false}" == "true" ]]; then
+      exit 1
+    fi
+    if [[ -n "${MOCK_DESTROY_NAT_MODE_ROWS:-}" ]]; then
+      printf '%b\n' "${MOCK_DESTROY_NAT_MODE_ROWS}"
+      exit 0
+    fi
+    printf '%s\n' "AUTO_ONLY ALL_SUBNETWORKS_ALL_IP_RANGES"
+    exit 0
+  fi
   if [[ "${MOCK_NAT_EXISTS:-false}" == "true" ]]; then
     printf '%s\n' "${MOCK_NAT_NAME:-oc-nat}"
     exit 0
   fi
   exit 1
+fi
+
+if [[ "$*" == *"compute instances delete"* ]]; then
+  if [[ "${MOCK_DESTROY_FAIL_INSTANCE_DELETE:-false}" == "true" ]]; then
+    echo "mocked instance delete failure" >&2
+    exit 41
+  fi
+  exit 0
+fi
+
+if [[ "$*" == *"compute disks remove-resource-policies"* ]]; then
+  if [[ "${MOCK_DESTROY_FAIL_SNAPSHOT_DETACH:-false}" == "true" ]]; then
+    echo "mocked snapshot detach failure" >&2
+    exit 45
+  fi
+  exit 0
+fi
+
+if [[ "$*" == *"compute resource-policies delete"* ]]; then
+  if [[ "${MOCK_DESTROY_FAIL_SNAPSHOT_DELETE:-false}" == "true" ]]; then
+    echo "mocked snapshot delete failure" >&2
+    exit 46
+  fi
+  exit 0
+fi
+
+if [[ "$*" == *"compute instance-templates delete"* ]]; then
+  if [[ "${MOCK_DESTROY_FAIL_TEMPLATE_DELETE:-false}" == "true" ]]; then
+    echo "mocked template delete failure" >&2
+    exit 42
+  fi
+  exit 0
+fi
+
+if [[ "$*" == *"compute routers nats delete"* ]]; then
+  if [[ "${MOCK_DESTROY_FAIL_NAT_DELETE:-false}" == "true" ]]; then
+    echo "mocked NAT delete failure" >&2
+    exit 43
+  fi
+  exit 0
+fi
+
+if [[ "$*" == *"compute routers delete"* ]]; then
+  if [[ "${MOCK_DESTROY_FAIL_ROUTER_DELETE:-false}" == "true" ]]; then
+    echo "mocked router delete failure" >&2
+    exit 44
+  fi
+  exit 0
+fi
+
+if [[ "$*" == *"compute machine-images describe"* && "$*" == *"--format=value(name)"* ]]; then
+  if [[ "${MOCK_DESTROY_MACHINE_IMAGE_DESCRIBE_FAIL:-false}" == "true" ]]; then
+    exit 1
+  fi
+  printf '%s\n' "${MOCK_DESTROY_MACHINE_IMAGE_DESCRIBE_NAME:-${MOCK_DESTROY_MACHINE_IMAGE_NAME:-oc-image-20260324-001}}"
+  exit 0
+fi
+
+if [[ "$*" == *"compute machine-images delete"* ]]; then
+  if [[ "${MOCK_DESTROY_FAIL_MACHINE_IMAGE_DELETE:-false}" == "true" ]]; then
+    echo "mocked machine image delete failure" >&2
+    exit 47
+  fi
+  exit 0
 fi
 
 for arg in "$@"; do
@@ -184,42 +537,21 @@ test_create_template_command_and_startup_script() {
   assert_contains "${log_content}" "--no-service-account" "create-template passes no-service-account to gcloud"
   assert_contains "${log_content}" "--no-scopes" "create-template disables scopes when no service account is attached"
   assert_contains "${log_content}" "--no-address" "create-template disables external IPv4 when requested"
-  assert_contains "${log_content}" "apt-get install -y docker.io git curl ca-certificates acl" "embedded startup script installs Docker and ACL prerequisites"
-  assert_contains "${log_content}" "apt-get install -y docker-compose-plugin" "embedded startup script attempts Docker Compose plugin install"
-  assert_contains "${log_content}" "apt-get install -y docker-compose" "embedded startup script falls back to docker-compose package"
-  assert_contains "${log_content}" "docker-cli-plugin-metadata" "embedded startup script installs a metadata-aware compose wrapper"
-  assert_contains "${log_content}" "/usr/local/lib/docker/cli-plugins/docker-compose" "embedded startup script installs a compose wrapper when needed"
-  assert_contains "${log_content}" "git clone --depth 1 --branch \"v\${tag}\" https://github.com/openclaw/openclaw.git" "embedded startup script clones the pinned OpenClaw repo"
-  assert_contains "${log_content}" "/usr/local/bin/openclaw-docker-setup" "embedded startup script installs the OpenClaw setup wrapper"
-  assert_contains "${log_content}" "/usr/local/bin/openclaw" "embedded startup script installs the OpenClaw CLI wrapper"
-  assert_contains "${log_content}" "OPENCLAW_REPO_DIR=\"\$(seed_user_checkout)\"" "embedded wrapper seeds a user checkout before setup"
-  assert_contains "${log_content}" "tar -C \"\${source_dir}\" --exclude .git -cf - . | tar -C \"\${temp_dir}\" -xf -" "embedded wrapper copies the staged repo into a user-writable checkout"
-  assert_contains "${log_content}" "if ! docker info >/dev/null 2>&1; then" "embedded wrapper checks Docker access before starting setup"
-  assert_contains "${log_content}" "exec sg docker -c" "embedded wrapper can self-heal current sessions through the docker group"
-  assert_contains "${log_content}" "if [[ \"\${1:-}\" == \"--interactive\" ]]; then" "embedded wrapper keeps an explicit escape hatch to the upstream interactive setup"
-  assert_contains "${log_content}" "config set gateway.mode local" "embedded wrapper pre-seeds gateway.mode before starting the gateway"
-  assert_contains "${log_content}" "config set gateway.controlUi.allowedOrigins" "embedded wrapper pre-seeds Control UI origins for non-loopback bind"
-  assert_contains "${log_content}" "--non-interactive" "embedded wrapper runs non-interactive onboarding by default"
-  assert_contains "${log_content}" "--skip-health" "embedded wrapper skips the insecure non-loopback health probe during local LAN onboarding"
-  assert_contains "${log_content}" "docker compose up -d openclaw-gateway" "embedded wrapper starts the gateway after pre-seeding config"
-  assert_contains "${log_content}" "chown -R \"\${HOST_UID}:\${HOST_GID}\" /host-home/.openclaw" "embedded wrapper repairs host ownership for the operator OpenClaw state directory"
-  assert_contains "${log_content}" "root_cmd=(sudo)" "embedded wrapper can elevate to reconcile host ACLs"
-  assert_contains "${log_content}" "\"\${root_cmd[@]}\" chown -R \"\${container_uid}:\${container_gid}\" \"\${OPENCLAW_CONFIG_DIR}\"" "embedded wrapper restores container ownership for runtime-managed OpenClaw state"
-  assert_contains "${log_content}" "\"\${root_cmd[@]}\" setfacl -R -m \"u:\${host_uid}:rwX,u:\${container_uid}:rwX,m::rwX\"" "embedded wrapper grants both host and container users access to shared OpenClaw state"
-  assert_contains "${log_content}" "\"\${root_cmd[@]}\" find \"\${OPENCLAW_CONFIG_DIR}\" -type d -exec setfacl -m \"d:u:\${host_uid}:rwX,d:u:\${container_uid}:rwX,d:m::rwx\"" "embedded wrapper sets default ACLs for future OpenClaw state files"
-  assert_contains "${log_content}" "ensure_shared_openclaw_permissions" "embedded wrapper re-applies shared state permissions after onboarding"
-  assert_contains "${log_content}" "Provider auth was skipped intentionally for day-1 bootstrap." "embedded wrapper explains the day-1 auth posture"
-  assert_contains "${log_content}" "docker compose run --no-deps --rm openclaw-cli \"\$@\"" "embedded CLI wrapper runs the OpenClaw CLI through Docker Compose"
-  assert_contains "${log_content}" "if [[ \"\${1:-}\" == \"daemon\" ]]; then" "embedded CLI wrapper special-cases daemon commands for Docker deployments"
-  assert_contains "${log_content}" "systemd daemon commands are not applicable on this host because the gateway is managed by Docker Compose." "embedded CLI wrapper explains daemon-status behavior on Docker"
-  assert_not_contains "${log_content}" "cd /opt/openclaw/openclaw" "embedded wrapper no longer runs setup from the staged root-owned repo"
-  assert_contains "${log_content}" "OPENCLAW_OWNER=\"root\"" "embedded startup script defaults OpenClaw state ownership to root"
-  assert_contains "${log_content}" "OPENCLAW_GROUP=\"root\"" "embedded startup script defaults OpenClaw state group to root"
-  assert_contains "${log_content}" "chown \"\${owner_name}:\${group_name}\"" "embedded startup script assigns ownership for OpenClaw state dirs"
-  assert_contains "${log_content}" "usermod -aG docker \"\${OPENCLAW_OWNER}\"" "embedded startup script adds the operator user to the docker group"
-  assert_contains "${log_content}" "OPENCLAW_HOME=\"/root\"" "embedded startup script falls back to /root"
-  assert_not_contains "${log_content}" "/home/root/.openclaw" "embedded startup script no longer writes to /home/root"
-  assert_not_contains "${log_content}" "chown node:node" "embedded wrapper no longer forces host state ownership to the container UID"
+  assert_contains "${RUN_OUTPUT}" "startup_script_source: embedded-vm-prereqs-v1" "create-template reports new startup script source"
+  assert_contains "${RUN_OUTPUT}" "startup_profile: vm-prereqs-v1" "create-template reports startup profile"
+  assert_contains "${RUN_OUTPUT}" "startup_contract_version: startup-ready-v1" "create-template reports startup contract version"
+  assert_contains "${RUN_OUTPUT}" "startup_ready_sentinel: /var/lib/openclaw/startup-ready-v1" "create-template reports readiness sentinel"
+  assert_contains "${log_content}" "startup_script_source=embedded-vm-prereqs-v1" "template metadata uses vm prereqs source contract"
+  assert_contains "${log_content}" "startup_profile=vm-prereqs-v1" "template metadata records startup profile"
+  assert_contains "${log_content}" "startup_contract_version=startup-ready-v1" "template metadata records startup contract version"
+  assert_contains "${log_content}" "startup_ready_sentinel=/var/lib/openclaw/startup-ready-v1" "template metadata records readiness sentinel"
+  assert_contains "${log_content}" "apt-get install -y ca-certificates curl" "embedded startup script installs only baseline VM prerequisites"
+  assert_contains "${log_content}" "STARTUP_READY_SENTINEL=\"/var/lib/openclaw/startup-ready-v1\"" "embedded startup script defines the readiness sentinel"
+  assert_contains "${log_content}" "cat >\"\${STARTUP_READY_SENTINEL}\"" "embedded startup script writes readiness sentinel"
+  assert_not_contains "${log_content}" "docker.io" "embedded startup script does not install Docker"
+  assert_not_contains "${log_content}" "docker compose" "embedded startup script does not invoke Docker Compose"
+  assert_not_contains "${log_content}" "openclaw-docker-setup" "embedded startup script does not install OpenClaw wrappers"
+  assert_not_contains "${log_content}" "git clone --depth 1 https://github.com/openclaw/openclaw.git" "embedded startup script does not clone OpenClaw repo"
 }
 
 test_create_instance_first_run_flow() {
@@ -363,6 +695,26 @@ test_docs_smoke_commands() {
     --dry-run
   assert_status 0 "README Cloud NAT example parses in dry-run mode"
 
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --template-name oc-template \
+    --router-name oc-router \
+    --nat-name oc-nat \
+    --dry-run
+  assert_status 0 "README destroy companion example parses in dry-run mode"
+  assert_contains "${RUN_OUTPUT}" "Phase 1 target order:" "README destroy companion example emits teardown target order"
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --template-name oc-template \
+    --router-name oc-router \
+    --nat-name oc-nat \
+    --dry-run
+  assert_status 0 "runbook destroy dry-run example parses in dry-run mode"
+  assert_contains "${RUN_OUTPUT}" "Dry-run mode: no resources were modified." "runbook destroy dry-run example stays mutation-safe"
+
   run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/repair-instance-bootstrap.sh" \
     --project-id hoangnb-openclaw \
     --instance-name oc-main \
@@ -370,6 +722,226 @@ test_docs_smoke_commands() {
     --run-now \
     --dry-run
   assert_status 0 "repair-instance-bootstrap example parses in dry-run mode"
+}
+
+test_install_help_and_noninteractive_gcloud_guard() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" --help
+  assert_status 0 "install.sh --help renders usage"
+  assert_contains "${RUN_OUTPUT}" "Create or reuse an OpenClaw VM through the template-backed provisioning flow." "install.sh help describes primary flow"
+
+  run_capture bash -c "env PATH=\"/usr/bin:/bin\" bash \"${ROOT_DIR}/scripts/openclaw-gcp/install.sh\" --project-id test-project --instance-name test-vm --zone asia-southeast1-a </dev/null"
+  assert_status 1 "install.sh fails before provisioning when gcloud is missing"
+  assert_contains "${RUN_OUTPUT}" "Preflight failed: gcloud CLI is not installed or not on PATH" "install.sh reports missing gcloud preflight failure"
+  assert_contains "${RUN_OUTPUT}" "Recovery: install Google Cloud CLI, then run: gcloud init" "install.sh prints exact gcloud recovery command"
+  assert_not_contains "${RUN_OUTPUT}" "Provisioning instance through template-backed flow..." "install.sh does not reach provisioning after preflight failure"
+}
+
+test_install_parser_missing_value_guard() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" --project-id
+  assert_status 1 "install.sh rejects missing values for value-taking flags"
+  assert_contains "${RUN_OUTPUT}" "Error: missing value for --project-id" "install.sh reports a controlled missing-value parser error"
+  assert_not_contains "${RUN_OUTPUT}" "shift count out of range" "install.sh avoids raw shell shift failures for missing option values"
+}
+
+test_install_prompt_and_nonprompt_behavior() {
+  local mock_dir
+  mock_dir="$(new_mock_env install-prompt-nonprompt)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" MOCK_PROJECT_ID="(unset)" \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --instance-name oc-main \
+    --zone asia-southeast1-a \
+    --non-interactive \
+    --dry-run
+
+  assert_status 1 "install.sh non-interactive mode rejects missing required project input"
+  assert_contains "${RUN_OUTPUT}" "missing required input PROJECT_ID in non-interactive mode" "install.sh explains non-interactive missing input failure"
+
+  run_capture bash -c "printf 'hoangnb-openclaw\n' | env PATH=\"${mock_dir}/bin:\${PATH}\" MOCK_GCLOUD_LOG=\"${mock_dir}/gcloud.log\" MOCK_PROJECT_ID=\"(unset)\" MOCK_INSTANCE_EXISTS=true bash \"${ROOT_DIR}/scripts/openclaw-gcp/install.sh\" --interactive --instance-name oc-main --zone asia-southeast1-a --dry-run"
+
+  assert_status 0 "install.sh interactive mode prompts and accepts missing project input"
+  assert_contains "${RUN_OUTPUT}" "Preflight checks passed." "install.sh interactive prompt path completes preflight"
+}
+
+test_install_readiness_gate_dry_run_contract() {
+  local mock_dir
+  mock_dir="$(new_mock_env install-readiness-dry-run)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" MOCK_INSTANCE_EXISTS=true \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --zone asia-southeast1-a \
+    --dry-run
+
+  assert_status 0 "install.sh dry-run prints readiness gate contract before SSH handoff"
+  assert_contains "${RUN_OUTPUT}" "Readiness gate: probing VM startup contract and host readiness." "install.sh dry-run announces readiness stage"
+  assert_contains "${RUN_OUTPUT}" "Readiness log contract: \$HOME/.openclaw-gcp/install-logs/readiness-gate.log" "install.sh dry-run prints readiness log path contract"
+  assert_not_contains "${RUN_OUTPUT}" "/var/log/openclaw/readiness-gate.log" "install.sh readiness contract avoids root-owned log path"
+  assert_contains "${RUN_OUTPUT}" "Dry-run command (readiness probe):" "install.sh dry-run prints readiness probe command"
+  assert_contains "${RUN_OUTPUT}" "fuser" "install.sh readiness probe uses lock-based package-manager detection"
+  assert_contains "${RUN_OUTPUT}" "/var/lib/dpkg/lock-frontend" "install.sh readiness probe checks dpkg lock files"
+  assert_not_contains "${RUN_OUTPUT}" "pgrep\\ -f\\ \"apt-get\\|apt.systemd.daily\\|unattended-upgrade\\|dpkg\"" "install.sh readiness probe no longer uses broad process-name matching"
+}
+
+test_install_readiness_probe_retries_fresh_vm_iap_lookup_delay() {
+  local mock_dir
+  local log_content
+  mock_dir="$(new_mock_env install-readiness-retry)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_READINESS_SSH_FAIL_COUNT=2 \
+    OPENCLAW_READINESS_SSH_MAX_ATTEMPTS=4 \
+    OPENCLAW_READINESS_SSH_RETRY_DELAY_SECONDS=0 \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --zone asia-southeast1-a
+
+  assert_status 0 "install.sh retries transient fresh-VM IAP lookup failures"
+  assert_contains "${RUN_OUTPUT}" "Readiness gate: instance not yet reachable through IAP SSH (attempt 1/4); retrying in 0s." "install.sh reports first transient readiness retry"
+  assert_contains "${RUN_OUTPUT}" "Readiness gate: instance not yet reachable through IAP SSH (attempt 2/4); retrying in 0s." "install.sh reports second transient readiness retry"
+  assert_contains "${RUN_OUTPUT}" "Readiness gate passed." "install.sh eventually passes readiness after transient IAP delay"
+  assert_contains "${RUN_OUTPUT}" "Interactive SSH handoff stage: launching upstream installer." "install.sh continues to handoff after readiness retries succeed"
+
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_contains "${log_content}" "GCLOUD compute ssh oc-main --project hoangnb-openclaw --zone asia-southeast1-a --tunnel-through-iap --command" "install.sh emits readiness SSH command during retry flow"
+}
+
+test_install_firewall_preflight_predicate() {
+  local mock_dir
+  mock_dir="$(new_mock_env install-firewall-predicate)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_FIREWALL_RULE_LINES=$'allow-http\tINGRESS\tFalse\t35.235.240.0/20\ttcp:80' \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --zone asia-southeast1-a
+
+  assert_status 1 "install.sh rejects firewall false-positive rules that do not allow SSH"
+  assert_contains "${RUN_OUTPUT}" "no ingress firewall rule allows TCP 22 from 35.235.240.0/20" "install.sh reports missing SSH/IAP ingress when only tcp:80 rule exists"
+
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_FIREWALL_RULE_LINES=$'allow-http\tINGRESS\tFalse\t35.235.240.0/20\ttcp:80\nallow-iap-ssh\tINGRESS\tFalse\t35.235.240.0/20\ttcp:22' \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --zone asia-southeast1-a
+
+  assert_status 0 "install.sh accepts a valid SSH/IAP firewall rule"
+  assert_contains "${RUN_OUTPUT}" "Preflight checks passed." "install.sh preflight proceeds when a valid rule is present"
+  assert_contains "${RUN_OUTPUT}" "Readiness gate passed." "install.sh continues past preflight after matching a valid rule"
+}
+
+test_install_cross_zone_existing_instance_guard() {
+  local mock_dir
+  mock_dir="$(new_mock_env install-cross-zone-existing)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_INSTANCE_EXISTING_ZONE=asia-southeast1-b \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --zone asia-southeast1-a \
+    --dry-run
+
+  assert_status 1 "install.sh fails fast when instance exists in a different zone"
+  assert_contains "${RUN_OUTPUT}" "instance 'oc-main' already exists in zone 'asia-southeast1-b', not requested zone 'asia-southeast1-a'" "install.sh reports cross-zone mismatch before provisioning"
+  assert_not_contains "${RUN_OUTPUT}" "Provisioning instance through template-backed flow..." "install.sh does not enter create path for cross-zone existing instance"
+
+  local log_content
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute instances create oc-main" "install.sh does not emit create command for cross-zone existing instance"
+}
+
+test_install_reuse_eligibility_guardrails() {
+  local mock_dir
+  mock_dir="$(new_mock_env install-reuse-eligibility)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_STARTUP_PROFILE=custom-startup-script \
+    MOCK_STARTUP_SCRIPT_SOURCE=file-sha256:deadbeef \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --zone asia-southeast1-a
+
+  assert_status 1 "install.sh rejects reused instances with custom startup contracts"
+  assert_contains "${RUN_OUTPUT}" "uses a custom startup contract that this installer will not auto-repair" "install.sh explains custom-contract rejection"
+  assert_not_contains "${RUN_OUTPUT}" "Interactive SSH handoff stage: launching upstream installer." "install.sh stops before SSH handoff when reuse eligibility fails"
+}
+
+test_install_repairable_reuse_contract_auto_repairs() {
+  local mock_dir
+  mock_dir="$(new_mock_env install-repairable-reuse)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_STARTUP_PROFILE=legacy-bootstrap-v10 \
+    MOCK_STARTUP_SCRIPT_SOURCE=embedded-openclaw-bootstrap-v10 \
+    MOCK_STARTUP_CONTRACT_VERSION=legacy-bootstrap-v10 \
+    MOCK_STARTUP_READY_SENTINEL=/var/lib/openclaw/legacy-ready-v10 \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --zone asia-southeast1-a
+
+  assert_status 0 "install.sh auto-repairs legacy startup contracts for reused instances"
+  assert_contains "${RUN_OUTPUT}" "Readiness gate: startup contract mismatch detected; attempting in-place repair." "install.sh announces in-place repair for repairable reuse contracts"
+  assert_contains "${RUN_OUTPUT}" "Readiness gate passed." "install.sh revalidates successfully after repair"
+  assert_contains "${RUN_OUTPUT}" "Interactive SSH handoff stage: launching upstream installer." "install.sh continues to the SSH handoff after successful repair"
+
+  local log_content
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_contains "${log_content}" "GCLOUD compute instances add-metadata oc-main --project hoangnb-openclaw --zone asia-southeast1-a" "install.sh repair path updates instance metadata before revalidation"
+}
+
+test_install_ssh_handoff_contract_and_failure_summary() {
+  local mock_dir
+  mock_dir="$(new_mock_env install-ssh-handoff)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" MOCK_INSTANCE_EXISTS=true \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --zone asia-southeast1-a \
+    --dry-run
+
+  assert_status 0 "install.sh dry-run prints interactive SSH handoff command contract"
+  assert_contains "${RUN_OUTPUT}" "Dry-run command (interactive SSH handoff):" "install.sh dry-run prints handoff command"
+  assert_contains "${RUN_OUTPUT}" "--tunnel-through-iap" "install.sh handoff command preserves IAP SSH posture"
+  assert_contains "${RUN_OUTPUT}" "curl -fsSL https://openclaw.ai/install.sh | bash" "install.sh handoff command includes upstream installer"
+  assert_contains "${RUN_OUTPUT}" "umask\\ 077" "install.sh handoff command hardens transcript umask"
+  assert_contains "${RUN_OUTPUT}" "mkdir\\ -m\\ 700\\ -p" "install.sh handoff command creates transcript directory with private permissions"
+  assert_contains "${RUN_OUTPUT}" "chmod\\ 600\\ " "install.sh handoff command hardens transcript file permissions"
+  assert_contains "${RUN_OUTPUT}" " -- -t" "install.sh handoff command requests interactive TTY"
+
+  run_capture run_with_mock "${mock_dir}" MOCK_INSTANCE_EXISTS=true MOCK_SSH_FAIL_HANDOFF=true \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --zone asia-southeast1-a
+
+  assert_status 1 "install.sh prints local failure summary when SSH handoff fails"
+  assert_contains "${RUN_OUTPUT}" "Install handoff failed: upstream installer exited non-zero or SSH handoff could not be completed" "install.sh prints install handoff failure summary"
+  assert_contains "${RUN_OUTPUT}" "Remote installer log hint: \$HOME/.openclaw-gcp/install-logs/latest.log" "install.sh prints remote installer log hint on failure"
 }
 
 test_cloud_nat_idempotent_flow() {
@@ -405,8 +977,308 @@ test_repair_instance_bootstrap_flow() {
   local log_content
   log_content="$(cat "${mock_dir}/gcloud.log")"
   assert_contains "${log_content}" "GCLOUD compute instances add-metadata oc-main --project hoangnb-openclaw --zone asia-southeast1-a" "repair-instance-bootstrap updates instance metadata"
-  assert_contains "${log_content}" "startup_script_source=embedded-openclaw-bootstrap-v10" "repair-instance-bootstrap marks the refreshed bootstrap version"
+  assert_contains "${log_content}" "startup_script_source=embedded-vm-prereqs-v1" "repair-instance-bootstrap marks the refreshed startup profile"
+  assert_contains "${log_content}" "startup_contract_version=startup-ready-v1" "repair-instance-bootstrap persists startup contract version"
+  assert_contains "${log_content}" "startup_ready_sentinel=/var/lib/openclaw/startup-ready-v1" "repair-instance-bootstrap persists readiness sentinel metadata"
+  assert_contains "${log_content}" "readiness_log_path=/var/log/openclaw/readiness-gate.log" "repair-instance-bootstrap persists readiness log path metadata"
   assert_contains "${log_content}" "GCLOUD compute ssh oc-main --project hoangnb-openclaw --zone asia-southeast1-a --tunnel-through-iap --command sudo google_metadata_script_runner startup" "repair-instance-bootstrap reruns startup over IAP by default"
+}
+
+test_repair_instance_bootstrap_rejects_invalid_metadata_values() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/repair-instance-bootstrap.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --openclaw-image "bad,image" \
+    --dry-run
+  assert_status 1 "repair-instance-bootstrap rejects openclaw-image values with commas"
+  assert_contains "${RUN_OUTPUT}" "openclaw_image must not contain ',' because it is persisted in metadata" "repair-instance-bootstrap explains comma metadata guard"
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/repair-instance-bootstrap.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --openclaw-image "bad=value" \
+    --dry-run
+  assert_status 1 "repair-instance-bootstrap rejects openclaw-image values with equals signs"
+  assert_contains "${RUN_OUTPUT}" "openclaw_image must not contain '=' because it is persisted in metadata" "repair-instance-bootstrap explains equals metadata guard"
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/repair-instance-bootstrap.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --openclaw-tag $'bad\ntag' \
+    --dry-run
+  assert_status 1 "repair-instance-bootstrap rejects openclaw-tag values with newlines"
+  assert_contains "${RUN_OUTPUT}" "openclaw_tag must not contain newlines" "repair-instance-bootstrap explains newline metadata guard"
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/repair-instance-bootstrap.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --openclaw-image "" \
+    --dry-run
+  assert_status 1 "repair-instance-bootstrap rejects empty openclaw-image values"
+  assert_contains "${RUN_OUTPUT}" "--openclaw-image cannot be empty" "repair-instance-bootstrap explains empty openclaw-image guard"
+}
+
+test_destroy_help_parser_and_confirmation_contract() {
+  local mock_dir
+  mock_dir="$(new_mock_env destroy-help-parser)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" --help
+  assert_status 0 "destroy.sh --help renders usage"
+  assert_contains "${RUN_OUTPUT}" "Destroy the standard OpenClaw GCP deployment by exact resource names." "destroy.sh help describes exact-name contract"
+  assert_contains "${RUN_OUTPUT}" "--dry-run prints plan and commands without mutating resources" "destroy.sh help describes dry-run safety contract"
+  assert_contains "${RUN_OUTPUT}" "--snapshot-policy-name <name>" "destroy.sh help includes snapshot policy extra flag"
+  assert_contains "${RUN_OUTPUT}" "--clone-instance-name <name>" "destroy.sh help includes clone extra flag"
+  assert_contains "${RUN_OUTPUT}" "--machine-image-name <name>" "destroy.sh help includes machine image extra flag"
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" --project-id
+  assert_status 1 "destroy.sh rejects missing values for value-taking flags"
+  assert_contains "${RUN_OUTPUT}" "Error: missing value for --project-id" "destroy.sh reports a controlled missing-value parser error"
+  assert_not_contains "${RUN_OUTPUT}" "shift count out of range" "destroy.sh avoids raw shell shift failures for missing option values"
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --snapshot-policy-disk oc-main \
+    --dry-run
+  assert_status 1 "destroy.sh requires snapshot-policy-name when snapshot disk context is passed"
+  assert_contains "${RUN_OUTPUT}" "--snapshot-policy-disk requires --snapshot-policy-name" "destroy.sh enforces snapshot disk parser guardrail"
+
+  run_capture bash -c "printf 'NOPE\n' | env PATH=\"${mock_dir}/bin:\${PATH}\" MOCK_GCLOUD_LOG=\"${mock_dir}/gcloud.log\" bash \"${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh\" --project-id hoangnb-openclaw --interactive"
+  assert_status 1 "destroy.sh interactive mode requires typed confirmation"
+  assert_contains "${RUN_OUTPUT}" "typed confirmation did not match; aborting" "destroy.sh rejects incorrect typed confirmation token"
+
+  local log_content
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete" "destroy.sh confirmation failure emits no instance delete command"
+  assert_not_contains "${log_content}" "GCLOUD compute instance-templates delete" "destroy.sh confirmation failure emits no template delete command"
+  assert_not_contains "${log_content}" "GCLOUD compute routers nats delete" "destroy.sh confirmation failure emits no NAT delete command"
+  assert_not_contains "${log_content}" "GCLOUD compute routers delete" "destroy.sh confirmation failure emits no router delete command"
+
+  mock_dir="$(new_mock_env destroy-explicit-project-guard)"
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_PROJECT_ID=prod-openclaw \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --yes
+  assert_status 1 "destroy.sh rejects ambient gcloud project fallback for real deletes"
+  assert_contains "${RUN_OUTPUT}" "real destructive runs require explicit --project-id" "destroy.sh explains explicit project targeting requirement"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete" "destroy.sh ambient project refusal emits no instance delete command"
+  assert_not_contains "${log_content}" "GCLOUD compute instance-templates delete" "destroy.sh ambient project refusal emits no template delete command"
+  assert_not_contains "${log_content}" "GCLOUD compute routers nats delete" "destroy.sh ambient project refusal emits no NAT delete command"
+  assert_not_contains "${log_content}" "GCLOUD compute routers delete" "destroy.sh ambient project refusal emits no router delete command"
+}
+
+test_destroy_dry_run_contract() {
+  local mock_dir
+  mock_dir="$(new_mock_env destroy-dry-run)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --dry-run
+
+  assert_status 0 "destroy.sh dry-run succeeds"
+  assert_contains "${RUN_OUTPUT}" "Phase 1 target order:" "destroy.sh dry-run prints deterministic target order"
+  assert_contains "${RUN_OUTPUT}" "gcloud compute instances delete oc-main" "destroy.sh dry-run prints planned instance delete command"
+  assert_contains "${RUN_OUTPUT}" "gcloud compute instance-templates delete oc-template" "destroy.sh dry-run prints planned template delete command"
+  assert_contains "${RUN_OUTPUT}" "gcloud compute routers nats delete oc-nat" "destroy.sh dry-run prints planned NAT delete command"
+  assert_contains "${RUN_OUTPUT}" "gcloud compute routers delete oc-router" "destroy.sh dry-run prints planned router delete command"
+  assert_contains "${RUN_OUTPUT}" "Dry-run mode: no resources were modified." "destroy.sh dry-run reports no mutations"
+  assert_not_contains "${RUN_OUTPUT}" "Running Phase 1 qualification checks..." "destroy.sh dry-run exits before qualification checks"
+  assert_not_contains "${RUN_OUTPUT}" "snapshot_policy_name:" "destroy.sh default dry-run omits extra-resource rows when extras are not requested"
+
+  local log_content
+  log_content="$(cat "${mock_dir}/gcloud.log" 2>/dev/null || true)"
+  assert_not_contains "${log_content}" "GCLOUD compute instances describe" "destroy.sh dry-run does not invoke instance qualification describes"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete" "destroy.sh dry-run emits no delete command"
+
+  run_capture run_with_mock "${mock_dir}" \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --snapshot-policy-name oc-daily-snapshots \
+    --snapshot-policy-disk oc-main \
+    --machine-image-name oc-image-20260324-001 \
+    --clone-instance-name oc-clone \
+    --dry-run
+  assert_status 0 "destroy.sh extra-resource dry-run succeeds"
+  assert_contains "${RUN_OUTPUT}" "Phase 2 explicit extra targets:" "destroy.sh dry-run prints explicit extra targets when named"
+  assert_contains "${RUN_OUTPUT}" "snapshot_policy_name: oc-daily-snapshots" "destroy.sh dry-run shows named snapshot policy"
+  assert_contains "${RUN_OUTPUT}" "clone_instance_name: oc-clone" "destroy.sh dry-run shows named clone target"
+  assert_contains "${RUN_OUTPUT}" "machine_image_name: oc-image-20260324-001" "destroy.sh dry-run shows named machine image target"
+  assert_contains "${RUN_OUTPUT}" "gcloud compute disks remove-resource-policies oc-main" "destroy.sh dry-run prints planned snapshot detach command when disk context is provided"
+  assert_contains "${RUN_OUTPUT}" "gcloud compute machine-images delete oc-image-20260324-001" "destroy.sh dry-run prints planned machine-image delete command when named"
+}
+
+test_destroy_qualification_failures_block_deletes() {
+  local mock_dir
+  local log_content
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  mock_dir="$(new_mock_env destroy-qual-extra-disk)"
+  run_capture run_with_mock "${mock_dir}" MOCK_DESTROY_DISK_ROWS=$'true true\nfalse true' \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --yes
+  assert_status 1 "destroy.sh rejects instances with extra attached disks"
+  assert_contains "${RUN_OUTPUT}" "Qualification failed [instance-disk-safety]" "destroy.sh reports disk safety predicate failure for extra disk"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete" "extra-disk qualification failure emits no delete commands"
+
+  mock_dir="$(new_mock_env destroy-qual-autodelete)"
+  run_capture run_with_mock "${mock_dir}" MOCK_DESTROY_DISK_ROWS=$'true false' \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --yes
+  assert_status 1 "destroy.sh rejects sole-disk autoDelete=false predicates"
+  assert_contains "${RUN_OUTPUT}" "disk predicate mismatch" "destroy.sh explains autoDelete mismatch"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete" "autoDelete=false qualification failure emits no delete commands"
+
+  mock_dir="$(new_mock_env destroy-qual-template)"
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_DESTROY_TEMPLATE_METADATA_LINES=$'startup_script_source\tembedded-vm-prereqs-v1\nstartup_profile\tvm-prereqs-v1\nstartup_contract_version\tstartup-ready-v1' \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --yes
+  assert_status 1 "destroy.sh rejects template startup metadata drift"
+  assert_contains "${RUN_OUTPUT}" "required metadata key missing: startup_ready_sentinel" "destroy.sh reports missing startup contract metadata key"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete" "template metadata failure emits no delete commands"
+
+  mock_dir="$(new_mock_env destroy-qual-router)"
+  run_capture run_with_mock "${mock_dir}" MOCK_DESTROY_ROUTER_NETWORK=custom-shared-network \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --yes
+  assert_status 1 "destroy.sh rejects router ownership drift"
+  assert_contains "${RUN_OUTPUT}" "Qualification failed [router-network-ownership]" "destroy.sh reports router-network predicate failure"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete" "router ownership failure emits no delete commands"
+
+  mock_dir="$(new_mock_env destroy-qual-nat)"
+  run_capture run_with_mock "${mock_dir}" MOCK_DESTROY_NAT_MODE_ROWS="MANUAL_ONLY ALL_SUBNETWORKS_ALL_IP_RANGES" \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --yes
+  assert_status 1 "destroy.sh rejects NAT allocation-mode drift"
+  assert_contains "${RUN_OUTPUT}" "Qualification failed [nat-parent-and-mode]" "destroy.sh reports NAT mode predicate failure"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete" "NAT mode failure emits no delete commands"
+}
+
+test_destroy_delete_order_and_mixed_failure_summary() {
+  local mock_dir
+  local log_content
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  mock_dir="$(new_mock_env destroy-success-order)"
+  run_capture run_with_mock "${mock_dir}" \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --yes
+
+  assert_status 0 "destroy.sh succeeds when all Phase 1 deletes succeed"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_ordered_line_patterns "${log_content}" "GCLOUD compute instances delete oc-main" "GCLOUD compute instance-templates delete oc-template" "destroy.sh deletes template after instance"
+  assert_ordered_line_patterns "${log_content}" "GCLOUD compute instance-templates delete oc-template" "GCLOUD compute routers nats delete oc-nat" "destroy.sh deletes NAT after template"
+  assert_ordered_line_patterns "${log_content}" "GCLOUD compute routers nats delete oc-nat" "GCLOUD compute routers delete oc-router" "destroy.sh deletes router after NAT"
+  assert_contains "${RUN_OUTPUT}" "instance:oc-main => succeeded" "destroy.sh summary marks instance deletion succeeded"
+  assert_contains "${RUN_OUTPUT}" "template:oc-template => succeeded" "destroy.sh summary marks template deletion succeeded"
+  assert_contains "${RUN_OUTPUT}" "nat:oc-nat => succeeded" "destroy.sh summary marks NAT deletion succeeded"
+  assert_contains "${RUN_OUTPUT}" "router:oc-router => succeeded" "destroy.sh summary marks router deletion succeeded"
+
+  mock_dir="$(new_mock_env destroy-mixed-failure)"
+  run_capture run_with_mock "${mock_dir}" MOCK_DESTROY_FAIL_TEMPLATE_DELETE=true \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --yes
+
+  assert_status 1 "destroy.sh exits non-zero on mixed-success teardown"
+  assert_contains "${RUN_OUTPUT}" "template:oc-template => failed" "destroy.sh summary marks template deletion failed"
+  assert_contains "${RUN_OUTPUT}" "nat:oc-nat => succeeded" "destroy.sh continues to NAT deletion after template failure"
+  assert_contains "${RUN_OUTPUT}" "router:oc-router => succeeded" "destroy.sh continues to router deletion after template failure"
+  assert_contains "${RUN_OUTPUT}" "manual cleanup hint:" "destroy.sh prints manual cleanup hints for failed resources"
+  assert_contains "${RUN_OUTPUT}" "Destroy completed with failures." "destroy.sh prints mixed-failure completion banner"
+
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_contains "${log_content}" "GCLOUD compute routers nats delete oc-nat" "destroy.sh still issues NAT delete in mixed-failure run"
+  assert_contains "${log_content}" "GCLOUD compute routers delete oc-router" "destroy.sh still issues router delete in mixed-failure run"
+}
+
+test_destroy_phase2_extra_resource_contract() {
+  local mock_dir
+  local log_content
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  mock_dir="$(new_mock_env destroy-phase2-snapshot-mismatch)"
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_DESTROY_SNAPSHOT_POLICY_ROWS="some-other-policy" \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --snapshot-policy-name oc-daily-snapshots \
+    --snapshot-policy-disk oc-main \
+    --yes
+  assert_status 1 "destroy.sh fails closed when named snapshot policy is not attached to the named disk"
+  assert_contains "${RUN_OUTPUT}" "Qualification failed [snapshot-policy-attachment]" "destroy.sh reports snapshot attachment predicate failure"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute resource-policies delete oc-daily-snapshots" "snapshot attachment mismatch emits no snapshot delete command"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete oc-main" "snapshot attachment mismatch blocks Phase 1 deletes"
+
+  mock_dir="$(new_mock_env destroy-phase2-clone-mismatch)"
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_CLONE_INSTANCE_NAME=oc-clone \
+    MOCK_DESTROY_CLONE_DISK_ROWS="true false" \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --clone-instance-name oc-clone \
+    --yes
+  assert_status 1 "destroy.sh exits non-zero when clone safety predicate fails"
+  assert_contains "${RUN_OUTPUT}" "clone-instance:oc-clone => failed (disk predicate mismatch" "destroy.sh reports clone disk safety mismatch in summary"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete oc-clone" "clone mismatch emits no clone delete command"
+
+  mock_dir="$(new_mock_env destroy-phase2-success-order)"
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_CLONE_INSTANCE_NAME=oc-clone \
+    MOCK_DESTROY_MACHINE_IMAGE_NAME=oc-image-20260324-001 \
+    MOCK_DESTROY_MACHINE_IMAGE_DESCRIBE_NAME=oc-image-20260324-001 \
+    MOCK_DESTROY_SNAPSHOT_POLICY_NAME=oc-daily-snapshots \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --snapshot-policy-name oc-daily-snapshots \
+    --snapshot-policy-disk oc-main \
+    --clone-instance-name oc-clone \
+    --machine-image-name oc-image-20260324-001 \
+    --yes
+  assert_status 0 "destroy.sh succeeds when all explicit Phase 2 extra resources delete cleanly"
+  assert_contains "${RUN_OUTPUT}" "snapshot-policy:oc-daily-snapshots => succeeded" "destroy.sh summary marks snapshot policy cleanup succeeded"
+  assert_contains "${RUN_OUTPUT}" "clone-instance:oc-clone => succeeded" "destroy.sh summary marks clone cleanup succeeded"
+  assert_contains "${RUN_OUTPUT}" "machine-image:oc-image-20260324-001 => succeeded" "destroy.sh summary marks machine image cleanup succeeded"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_ordered_line_patterns "${log_content}" "GCLOUD compute disks remove-resource-policies oc-main" "GCLOUD compute instances delete oc-main" "snapshot detach runs before core instance delete"
+  assert_ordered_line_patterns "${log_content}" "GCLOUD compute routers delete oc-router" "GCLOUD compute instances describe oc-clone" "clone cleanup starts after core stack completes"
+  assert_ordered_line_patterns "${log_content}" "GCLOUD compute instances delete oc-clone" "GCLOUD compute machine-images describe oc-image-20260324-001" "machine-image cleanup runs after clone cleanup"
+
+  mock_dir="$(new_mock_env destroy-phase2-mixed-failure-continues)"
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_CLONE_INSTANCE_NAME=oc-clone \
+    MOCK_DESTROY_CLONE_DISK_ROWS="true false" \
+    MOCK_DESTROY_MACHINE_IMAGE_NAME=oc-image-20260324-001 \
+    MOCK_DESTROY_MACHINE_IMAGE_DESCRIBE_NAME=oc-image-20260324-001 \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --clone-instance-name oc-clone \
+    --machine-image-name oc-image-20260324-001 \
+    --yes
+  assert_status 1 "destroy.sh mixed extra-resource failure exits non-zero"
+  assert_contains "${RUN_OUTPUT}" "clone-instance:oc-clone => failed" "destroy.sh reports clone failure in mixed extra-resource run"
+  assert_contains "${RUN_OUTPUT}" "machine-image:oc-image-20260324-001 => succeeded" "destroy.sh still runs later machine-image cleanup after clone failure"
+  assert_contains "${RUN_OUTPUT}" "Destroy completed with failures." "destroy.sh prints mixed-failure completion banner for extra-resource failures"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_contains "${log_content}" "GCLOUD compute machine-images delete oc-image-20260324-001" "destroy.sh continues to machine-image delete after clone failure"
 }
 
 test_negative_guards() {
@@ -482,8 +1354,24 @@ main() {
   test_template_reuse_rejects_explicit_drift_inputs
   test_snapshot_policy_reuse_and_region_default_zone
   test_docs_smoke_commands
+  test_install_help_and_noninteractive_gcloud_guard
+  test_install_parser_missing_value_guard
+  test_install_prompt_and_nonprompt_behavior
+  test_install_readiness_gate_dry_run_contract
+  test_install_readiness_probe_retries_fresh_vm_iap_lookup_delay
+  test_install_firewall_preflight_predicate
+  test_install_cross_zone_existing_instance_guard
+  test_install_reuse_eligibility_guardrails
+  test_install_repairable_reuse_contract_auto_repairs
+  test_install_ssh_handoff_contract_and_failure_summary
   test_cloud_nat_idempotent_flow
   test_repair_instance_bootstrap_flow
+  test_repair_instance_bootstrap_rejects_invalid_metadata_values
+  test_destroy_help_parser_and_confirmation_contract
+  test_destroy_dry_run_contract
+  test_destroy_qualification_failures_block_deletes
+  test_destroy_delete_order_and_mixed_failure_summary
+  test_destroy_phase2_extra_resource_contract
   test_negative_guards
 
   if (( TESTS_FAILED > 0 )); then
