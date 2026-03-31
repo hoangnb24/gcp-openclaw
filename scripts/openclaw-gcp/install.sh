@@ -70,6 +70,12 @@ die() {
   exit 1
 }
 
+require_option_value() {
+  local flag="$1"
+  local value="${2-}"
+  [[ -n "${value}" ]] && [[ "${value}" != --* ]] || die "missing value for ${flag}"
+}
+
 fail_preflight() {
   local problem="$1"
   local recovery="$2"
@@ -519,15 +525,15 @@ build_create_instance_cmd() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --project-id) PROJECT_ID="${2:-}"; shift 2 ;;
-    --instance-name) INSTANCE_NAME="${2:-}"; shift 2 ;;
-    --template-name) TEMPLATE_NAME="${2:-}"; shift 2 ;;
-    --region) REGION="${2:-}"; shift 2 ;;
-    --zone) ZONE="${2:-}"; shift 2 ;;
-    --openclaw-image) OPENCLAW_IMAGE="${2:-}"; shift 2 ;;
-    --openclaw-tag) OPENCLAW_TAG="${2:-}"; shift 2 ;;
-    --service-account) SERVICE_ACCOUNT="${2:-}"; NO_SERVICE_ACCOUNT="false"; shift 2 ;;
-    --scopes) SCOPES="${2:-}"; shift 2 ;;
+    --project-id) require_option_value "--project-id" "${2-}"; PROJECT_ID="$2"; shift 2 ;;
+    --instance-name) require_option_value "--instance-name" "${2-}"; INSTANCE_NAME="$2"; shift 2 ;;
+    --template-name) require_option_value "--template-name" "${2-}"; TEMPLATE_NAME="$2"; shift 2 ;;
+    --region) require_option_value "--region" "${2-}"; REGION="$2"; shift 2 ;;
+    --zone) require_option_value "--zone" "${2-}"; ZONE="$2"; shift 2 ;;
+    --openclaw-image) require_option_value "--openclaw-image" "${2-}"; OPENCLAW_IMAGE="$2"; shift 2 ;;
+    --openclaw-tag) require_option_value "--openclaw-tag" "${2-}"; OPENCLAW_TAG="$2"; shift 2 ;;
+    --service-account) require_option_value "--service-account" "${2-}"; SERVICE_ACCOUNT="$2"; NO_SERVICE_ACCOUNT="false"; shift 2 ;;
+    --scopes) require_option_value "--scopes" "${2-}"; SCOPES="$2"; shift 2 ;;
     --no-service-account) NO_SERVICE_ACCOUNT="true"; SERVICE_ACCOUNT=""; SCOPES=""; shift ;;
     --allow-external-ip) NO_ADDRESS="false"; shift ;;
     --dry-run) DRY_RUN="true"; shift ;;

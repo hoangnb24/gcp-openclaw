@@ -478,6 +478,15 @@ test_install_help_and_noninteractive_gcloud_guard() {
   assert_not_contains "${RUN_OUTPUT}" "Provisioning instance through template-backed flow..." "install.sh does not reach provisioning after preflight failure"
 }
 
+test_install_parser_missing_value_guard() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" --project-id
+  assert_status 1 "install.sh rejects missing values for value-taking flags"
+  assert_contains "${RUN_OUTPUT}" "Error: missing value for --project-id" "install.sh reports a controlled missing-value parser error"
+  assert_not_contains "${RUN_OUTPUT}" "shift count out of range" "install.sh avoids raw shell shift failures for missing option values"
+}
+
 test_install_prompt_and_nonprompt_behavior() {
   local mock_dir
   mock_dir="$(new_mock_env install-prompt-nonprompt)"
@@ -730,6 +739,7 @@ main() {
   test_snapshot_policy_reuse_and_region_default_zone
   test_docs_smoke_commands
   test_install_help_and_noninteractive_gcloud_guard
+  test_install_parser_missing_value_guard
   test_install_prompt_and_nonprompt_behavior
   test_install_readiness_gate_dry_run_contract
   test_install_firewall_preflight_predicate
