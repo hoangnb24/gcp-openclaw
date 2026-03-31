@@ -2,6 +2,7 @@
 set -euo pipefail
 
 PROJECT_ID=""
+PROJECT_ID_SOURCE="unset"
 INSTANCE_NAME="oc-main"
 TEMPLATE_NAME="oc-template"
 REGION="asia-southeast1"
@@ -48,7 +49,7 @@ Safety contract:
   - Interactive real runs require a typed confirmation token
 
 Options:
-  --project-id <id>        GCP project ID (defaults from gcloud config when available)
+  --project-id <id>        GCP project ID (required for real deletes; dry-run may default from gcloud config)
   --instance-name <name>   Instance name (default: ${INSTANCE_NAME})
   --template-name <name>   Instance template name (default: ${TEMPLATE_NAME})
   --region <region>        Region for template/router/NAT (default: ${REGION})
@@ -141,13 +142,34 @@ prompt_required() {
 }
 
 resolve_project_id() {
-  if [[ -z "${PROJECT_ID}" ]] && command -v gcloud >/dev/null 2>&1; then
-    PROJECT_ID="$(gcloud config get-value project 2>/dev/null || true)"
-    if [[ "${PROJECT_ID}" == "(unset)" ]]; then
-      PROJECT_ID=""
+  local configured_project=""
+
+  if [[ -n "${PROJECT_ID}" ]]; then
+    PROJECT_ID_SOURCE="flag"
+    return
+  fi
+
+  if command -v gcloud >/dev/null 2>&1; then
+    configured_project="$(gcloud config get-value project 2>/dev/null || true)"
+    if [[ "${configured_project}" != "(unset)" && -n "${configured_project}" ]]; then
+      PROJECT_ID="${configured_project}"
+      PROJECT_ID_SOURCE="gcloud"
     fi
   fi
+
+  if [[ -n "${PROJECT_ID}" ]]; then
+    return
+  fi
+
   prompt_required PROJECT_ID "GCP project ID: " "${PROJECT_ID}"
+  PROJECT_ID_SOURCE="prompt"
+}
+
+require_explicit_project_target_for_destroy() {
+  [[ "${DRY_RUN}" == "true" ]] && return 0
+  [[ "${PROJECT_ID_SOURCE}" != "gcloud" ]] && return 0
+
+  die "real destructive runs require explicit --project-id; refusing to use ambient gcloud project ${PROJECT_ID}"
 }
 
 validate_zone_region_pair() {
@@ -1006,6 +1028,7 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   exit 0
 fi
 
+require_explicit_project_target_for_destroy
 run_phase1_qualification_checks
 require_typed_confirmation
 execute_snapshot_policy_cleanup

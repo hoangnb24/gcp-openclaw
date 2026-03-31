@@ -1012,6 +1012,19 @@ test_destroy_help_parser_and_confirmation_contract() {
   assert_not_contains "${log_content}" "GCLOUD compute instance-templates delete" "destroy.sh confirmation failure emits no template delete command"
   assert_not_contains "${log_content}" "GCLOUD compute routers nats delete" "destroy.sh confirmation failure emits no NAT delete command"
   assert_not_contains "${log_content}" "GCLOUD compute routers delete" "destroy.sh confirmation failure emits no router delete command"
+
+  mock_dir="$(new_mock_env destroy-explicit-project-guard)"
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_PROJECT_ID=prod-openclaw \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --yes
+  assert_status 1 "destroy.sh rejects ambient gcloud project fallback for real deletes"
+  assert_contains "${RUN_OUTPUT}" "real destructive runs require explicit --project-id" "destroy.sh explains explicit project targeting requirement"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete" "destroy.sh ambient project refusal emits no instance delete command"
+  assert_not_contains "${log_content}" "GCLOUD compute instance-templates delete" "destroy.sh ambient project refusal emits no template delete command"
+  assert_not_contains "${log_content}" "GCLOUD compute routers nats delete" "destroy.sh ambient project refusal emits no NAT delete command"
+  assert_not_contains "${log_content}" "GCLOUD compute routers delete" "destroy.sh ambient project refusal emits no router delete command"
 }
 
 test_destroy_dry_run_contract() {
