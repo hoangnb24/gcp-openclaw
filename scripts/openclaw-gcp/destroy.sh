@@ -689,6 +689,163 @@ execute_snapshot_policy_cleanup() {
   DELETE_STEP_INDEX=$((DELETE_STEP_INDEX + 1))
 }
 
+execute_clone_instance_cleanup() {
+  local describe_cmd=()
+  local delete_cmd=()
+  local output=""
+  local row_count=0
+  local row=""
+  local boot=""
+  local auto_delete=""
+  local rest=""
+  local index="${DELETE_STEP_INDEX}"
+  local exit_code=0
+
+  [[ -n "${CLONE_INSTANCE_NAME}" ]] || return 0
+
+  describe_cmd=(
+    gcloud compute instances describe "${CLONE_INSTANCE_NAME}"
+    --project "${PROJECT_ID}"
+    --zone "${CLONE_ZONE}"
+    --flatten='disks[]'
+    --format='value(disks.boot,disks.autoDelete)'
+  )
+  delete_cmd=(
+    gcloud compute instances delete "${CLONE_INSTANCE_NAME}"
+    --project "${PROJECT_ID}"
+    --zone "${CLONE_ZONE}"
+    --quiet
+  )
+
+  printf 'Deleting %s...\n' "clone-instance:${CLONE_INSTANCE_NAME}"
+  if ! output="$("${describe_cmd[@]}" 2>/dev/null)"; then
+    DELETE_STATUS[index]="failed"
+    DELETE_DETAIL[index]="unable to describe clone instance in ${CLONE_ZONE}"
+    DELETE_RETRY[index]="$(render_command_string "${describe_cmd[@]}")"
+    DELETE_ANY_FAILURE="true"
+    DELETE_STEP_INDEX=$((DELETE_STEP_INDEX + 1))
+    return
+  fi
+
+  while IFS= read -r row; do
+    [[ -n "$(trim_space "${row}")" ]] || continue
+    row_count=$((row_count + 1))
+    if (( row_count > 1 )); then
+      DELETE_STATUS[index]="failed"
+      DELETE_DETAIL[index]="expected exactly one attached disk row, got ${row_count}"
+      DELETE_RETRY[index]="$(render_command_string "${describe_cmd[@]}")"
+      DELETE_ANY_FAILURE="true"
+      DELETE_STEP_INDEX=$((DELETE_STEP_INDEX + 1))
+      return
+    fi
+    IFS=$'\t ' read -r boot auto_delete rest <<<"${row}"
+    if [[ -n "${rest}" ]]; then
+      DELETE_STATUS[index]="failed"
+      DELETE_DETAIL[index]="ambiguous attached disk row format"
+      DELETE_RETRY[index]="$(render_command_string "${describe_cmd[@]}")"
+      DELETE_ANY_FAILURE="true"
+      DELETE_STEP_INDEX=$((DELETE_STEP_INDEX + 1))
+      return
+    fi
+  done <<<"${output}"
+
+  if (( row_count != 1 )); then
+    DELETE_STATUS[index]="failed"
+    DELETE_DETAIL[index]="expected exactly one attached disk row, got ${row_count}"
+    DELETE_RETRY[index]="$(render_command_string "${describe_cmd[@]}")"
+    DELETE_ANY_FAILURE="true"
+    DELETE_STEP_INDEX=$((DELETE_STEP_INDEX + 1))
+    return
+  fi
+
+  boot="$(normalize_lower "$(trim_space "${boot}")")"
+  auto_delete="$(normalize_lower "$(trim_space "${auto_delete}")")"
+  if [[ "${boot}" != "true" || "${auto_delete}" != "true" ]]; then
+    DELETE_STATUS[index]="failed"
+    DELETE_DETAIL[index]="disk predicate mismatch (boot=${boot:-unset}, autoDelete=${auto_delete:-unset})"
+    DELETE_RETRY[index]="$(render_command_string "${describe_cmd[@]}")"
+    DELETE_ANY_FAILURE="true"
+    DELETE_STEP_INDEX=$((DELETE_STEP_INDEX + 1))
+    return
+  fi
+
+  if "${delete_cmd[@]}"; then
+    DELETE_STATUS[index]="succeeded"
+    DELETE_DETAIL[index]="deleted successfully"
+    DELETE_RETRY[index]="$(render_command_string "${delete_cmd[@]}")"
+  else
+    exit_code=$?
+    DELETE_STATUS[index]="failed"
+    DELETE_DETAIL[index]="delete command exited with status ${exit_code}"
+    DELETE_RETRY[index]="$(render_command_string "${delete_cmd[@]}")"
+    DELETE_ANY_FAILURE="true"
+  fi
+  DELETE_STEP_INDEX=$((DELETE_STEP_INDEX + 1))
+}
+
+execute_machine_image_cleanup() {
+  local describe_cmd=()
+  local delete_cmd=()
+  local output=""
+  local row=""
+  local row_count=0
+  local described_name=""
+  local index="${DELETE_STEP_INDEX}"
+  local exit_code=0
+
+  [[ -n "${MACHINE_IMAGE_NAME}" ]] || return 0
+
+  describe_cmd=(
+    gcloud compute machine-images describe "${MACHINE_IMAGE_NAME}"
+    --project "${PROJECT_ID}"
+    --format='value(name)'
+  )
+  delete_cmd=(
+    gcloud compute machine-images delete "${MACHINE_IMAGE_NAME}"
+    --project "${PROJECT_ID}"
+    --quiet
+  )
+
+  printf 'Deleting %s...\n' "machine-image:${MACHINE_IMAGE_NAME}"
+  if ! output="$("${describe_cmd[@]}" 2>/dev/null)"; then
+    DELETE_STATUS[index]="failed"
+    DELETE_DETAIL[index]="unable to describe machine image ${MACHINE_IMAGE_NAME}"
+    DELETE_RETRY[index]="$(render_command_string "${describe_cmd[@]}")"
+    DELETE_ANY_FAILURE="true"
+    DELETE_STEP_INDEX=$((DELETE_STEP_INDEX + 1))
+    return
+  fi
+
+  while IFS= read -r row; do
+    row="$(trim_space "${row}")"
+    [[ -n "${row}" ]] || continue
+    row_count=$((row_count + 1))
+    described_name="${row}"
+  done <<<"${output}"
+
+  if (( row_count != 1 )) || [[ "${described_name}" != "${MACHINE_IMAGE_NAME}" ]]; then
+    DELETE_STATUS[index]="failed"
+    DELETE_DETAIL[index]="machine image describe output mismatch"
+    DELETE_RETRY[index]="$(render_command_string "${describe_cmd[@]}")"
+    DELETE_ANY_FAILURE="true"
+    DELETE_STEP_INDEX=$((DELETE_STEP_INDEX + 1))
+    return
+  fi
+
+  if "${delete_cmd[@]}"; then
+    DELETE_STATUS[index]="succeeded"
+    DELETE_DETAIL[index]="deleted successfully"
+    DELETE_RETRY[index]="$(render_command_string "${delete_cmd[@]}")"
+  else
+    exit_code=$?
+    DELETE_STATUS[index]="failed"
+    DELETE_DETAIL[index]="delete command exited with status ${exit_code}"
+    DELETE_RETRY[index]="$(render_command_string "${delete_cmd[@]}")"
+    DELETE_ANY_FAILURE="true"
+  fi
+  DELETE_STEP_INDEX=$((DELETE_STEP_INDEX + 1))
+}
+
 execute_phase1_teardown() {
   local instance_cmd=(
     gcloud compute instances delete "${INSTANCE_NAME}"
@@ -729,7 +886,7 @@ print_teardown_summary() {
   local failed_count=0
 
   echo
-  if [[ -n "${SNAPSHOT_POLICY_NAME}" ]]; then
+  if has_explicit_extra_targets; then
     echo "Teardown summary:"
   else
     echo "Phase 1 teardown summary:"
@@ -823,6 +980,12 @@ DELETE_RESOURCE+=(
   "nat:${NAT_NAME}"
   "router:${ROUTER_NAME}"
 )
+if [[ -n "${CLONE_INSTANCE_NAME}" ]]; then
+  DELETE_RESOURCE+=("clone-instance:${CLONE_INSTANCE_NAME}")
+fi
+if [[ -n "${MACHINE_IMAGE_NAME}" ]]; then
+  DELETE_RESOURCE+=("machine-image:${MACHINE_IMAGE_NAME}")
+fi
 DELETE_STATUS=()
 DELETE_DETAIL=()
 DELETE_RETRY=()
@@ -847,6 +1010,8 @@ run_phase1_qualification_checks
 require_typed_confirmation
 execute_snapshot_policy_cleanup
 execute_phase1_teardown
+execute_clone_instance_cleanup
+execute_machine_image_cleanup
 print_teardown_summary
 
 echo
