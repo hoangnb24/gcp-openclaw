@@ -128,7 +128,11 @@ if [[ "$*" == *"compute zones describe"* && "$*" == *"--format=value(region.base
 fi
 
 if [[ "$*" == *"compute firewall-rules list"* ]]; then
-  printf '%s\n' "allow-iap-ssh 35.235.240.0/20 tcp:22"
+  if [[ -n "${MOCK_FIREWALL_RULE_LINES:-}" ]]; then
+    printf '%b\n' "${MOCK_FIREWALL_RULE_LINES}"
+    exit 0
+  fi
+  printf '%b\n' "allow-iap-ssh\tINGRESS\tFalse\t35.235.240.0/20\ttcp:22"
   exit 0
 fi
 
@@ -514,6 +518,35 @@ test_install_readiness_gate_dry_run_contract() {
   assert_contains "${RUN_OUTPUT}" "Dry-run command (readiness probe):" "install.sh dry-run prints readiness probe command"
 }
 
+test_install_firewall_preflight_predicate() {
+  local mock_dir
+  mock_dir="$(new_mock_env install-firewall-predicate)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_FIREWALL_RULE_LINES=$'allow-http\tINGRESS\tFalse\t35.235.240.0/20\ttcp:80' \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --zone asia-southeast1-a
+
+  assert_status 1 "install.sh rejects firewall false-positive rules that do not allow SSH"
+  assert_contains "${RUN_OUTPUT}" "no ingress firewall rule allows TCP 22 from 35.235.240.0/20" "install.sh reports missing SSH/IAP ingress when only tcp:80 rule exists"
+
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_FIREWALL_RULE_LINES=$'allow-http\tINGRESS\tFalse\t35.235.240.0/20\ttcp:80\nallow-iap-ssh\tINGRESS\tFalse\t35.235.240.0/20\ttcp:22' \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --zone asia-southeast1-a
+
+  assert_status 0 "install.sh accepts a valid SSH/IAP firewall rule"
+  assert_contains "${RUN_OUTPUT}" "Preflight checks passed." "install.sh preflight proceeds when a valid rule is present"
+  assert_contains "${RUN_OUTPUT}" "Readiness gate passed." "install.sh continues past preflight after matching a valid rule"
+}
+
 test_install_reuse_eligibility_guardrails() {
   local mock_dir
   mock_dir="$(new_mock_env install-reuse-eligibility)"
@@ -677,6 +710,7 @@ main() {
   test_install_help_and_noninteractive_gcloud_guard
   test_install_prompt_and_nonprompt_behavior
   test_install_readiness_gate_dry_run_contract
+  test_install_firewall_preflight_predicate
   test_install_reuse_eligibility_guardrails
   test_install_ssh_handoff_contract_and_failure_summary
   test_cloud_nat_idempotent_flow

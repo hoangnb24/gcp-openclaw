@@ -182,16 +182,22 @@ check_zone_exists_and_matches_region() {
 }
 
 has_iap_ssh_firewall_candidate() {
-  local line
-  while IFS= read -r line; do
-    [[ -n "${line}" ]] || continue
-    if [[ "${line}" == *"${IAP_SSH_SOURCE_RANGE}"* ]] && [[ "${line}" == *"tcp:22"* || "${line}" == *"all"* ]]; then
+  local rule_name direction disabled source_ranges allowed_rules disabled_lower
+  while IFS=$'\t' read -r rule_name direction disabled source_ranges allowed_rules; do
+    [[ -n "${rule_name}" ]] || continue
+
+    disabled_lower="${disabled,,}"
+    [[ "${direction}" == "INGRESS" ]] || continue
+    [[ "${disabled_lower}" != "true" ]] || continue
+    [[ "${source_ranges}" == *"${IAP_SSH_SOURCE_RANGE}"* ]] || continue
+
+    if [[ "${allowed_rules}" =~ (^|[[:space:],;])all($|[[:space:],;]) ]] || [[ "${allowed_rules}" =~ tcp:22($|[^0-9]) ]]; then
       return 0
     fi
   done < <(
     gcloud compute firewall-rules list \
       --project "${PROJECT_ID}" \
-      --format='value(name,sourceRanges.list(),allowed[].map().firewall_rule().list())' 2>/dev/null || true
+      --format='value(name,direction,disabled,sourceRanges.list(),allowed[].map().firewall_rule().list())' 2>/dev/null || true
   )
   return 1
 }
