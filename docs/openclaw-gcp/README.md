@@ -47,6 +47,49 @@ Non-interactive automation:
 - pass `--non-interactive` and supply all required flags explicitly
 - preflight errors fail before provisioning and include concrete recovery commands
 
+## Destroy Workflow
+
+Use the destroy companion to tear down OpenClaw resources by exact names only.
+It does not discover or sweep unrelated/shared infrastructure.
+
+Start with a dry run:
+
+```bash
+bash scripts/openclaw-gcp/destroy.sh \
+  --project-id <gcp-project-id> \
+  --instance-name oc-main \
+  --template-name oc-template \
+  --router-name oc-router \
+  --nat-name oc-nat \
+  --dry-run
+```
+
+Interactive safety behavior:
+- real interactive runs require typing the confirmation token before deletions start
+- automation can bypass the prompt with `--yes` (recommended only for controlled CI/ops workflows)
+
+Automation example:
+
+```bash
+bash scripts/openclaw-gcp/destroy.sh \
+  --project-id <gcp-project-id> \
+  --instance-name oc-main \
+  --template-name oc-template \
+  --router-name oc-router \
+  --nat-name oc-nat \
+  --yes \
+  --non-interactive
+```
+
+Optional explicit extra targets (deleted only when named):
+- `--snapshot-policy-name <policy>`
+- `--snapshot-policy-disk <disk>` with `--snapshot-policy-disk-zone <zone>` when detach context is needed
+- `--clone-instance-name <name>` with `--clone-zone <zone>`
+- `--machine-image-name <name>`
+
+If any target delete fails, the script continues with remaining explicit targets, exits non-zero, and prints a final summary of succeeded vs failed actions.
+Treat that summary as the manual cleanup checklist before considering teardown complete.
+
 ## Troubleshooting
 
 Local preflight failures:
