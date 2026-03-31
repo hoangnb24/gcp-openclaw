@@ -23,7 +23,7 @@ STARTUP_PROFILE_EXPECTED="vm-prereqs-v1"
 STARTUP_SOURCE_EXPECTED="embedded-vm-prereqs-v1"
 STARTUP_CONTRACT_VERSION_EXPECTED="startup-ready-v1"
 STARTUP_READY_SENTINEL_EXPECTED="/var/lib/openclaw/startup-ready-v1"
-READINESS_LOG_PATH="/var/log/openclaw/readiness-gate.log"
+READINESS_LOG_PATH="\$HOME/.openclaw-gcp/install-logs/readiness-gate.log"
 READINESS_LOG_HINT_LINES="200"
 INSTALL_LOG_DIR_REMOTE="\$HOME/.openclaw-gcp/install-logs"
 INSTALL_LOG_LATEST_REMOTE="${INSTALL_LOG_DIR_REMOTE}/latest.log"
@@ -84,7 +84,7 @@ fail_readiness() {
   echo "Readiness gate failed: ${reason}" >&2
   echo "Remote readiness log: ${READINESS_LOG_PATH}" >&2
   echo "Next steps: ${remedy}" >&2
-  echo "Log retrieval hint: gcloud compute ssh ${INSTANCE_NAME} --project ${PROJECT_ID} --zone ${ZONE} --tunnel-through-iap --command \"sudo tail -n ${READINESS_LOG_HINT_LINES} ${READINESS_LOG_PATH}\"" >&2
+  echo "Log retrieval hint: gcloud compute ssh ${INSTANCE_NAME} --project ${PROJECT_ID} --zone ${ZONE} --tunnel-through-iap --command \"bash -lc 'tail -n ${READINESS_LOG_HINT_LINES} ${READINESS_LOG_PATH}'\"" >&2
   exit 1
 }
 

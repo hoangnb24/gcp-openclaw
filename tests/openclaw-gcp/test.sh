@@ -509,7 +509,8 @@ test_install_readiness_gate_dry_run_contract() {
 
   assert_status 0 "install.sh dry-run prints readiness gate contract before SSH handoff"
   assert_contains "${RUN_OUTPUT}" "Readiness gate: probing VM startup contract and host readiness." "install.sh dry-run announces readiness stage"
-  assert_contains "${RUN_OUTPUT}" "Readiness log contract: /var/log/openclaw/readiness-gate.log" "install.sh dry-run prints readiness log path contract"
+  assert_contains "${RUN_OUTPUT}" "Readiness log contract: \$HOME/.openclaw-gcp/install-logs/readiness-gate.log" "install.sh dry-run prints readiness log path contract"
+  assert_not_contains "${RUN_OUTPUT}" "/var/log/openclaw/readiness-gate.log" "install.sh readiness contract avoids root-owned log path"
   assert_contains "${RUN_OUTPUT}" "Dry-run command (readiness probe):" "install.sh dry-run prints readiness probe command"
 }
 
