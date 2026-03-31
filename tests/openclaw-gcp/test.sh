@@ -547,6 +547,28 @@ test_install_firewall_preflight_predicate() {
   assert_contains "${RUN_OUTPUT}" "Readiness gate passed." "install.sh continues past preflight after matching a valid rule"
 }
 
+test_install_cross_zone_existing_instance_guard() {
+  local mock_dir
+  mock_dir="$(new_mock_env install-cross-zone-existing)"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_INSTANCE_EXISTING_ZONE=asia-southeast1-b \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/install.sh" \
+    --project-id hoangnb-openclaw \
+    --instance-name oc-main \
+    --zone asia-southeast1-a \
+    --dry-run
+
+  assert_status 1 "install.sh fails fast when instance exists in a different zone"
+  assert_contains "${RUN_OUTPUT}" "instance 'oc-main' already exists in zone 'asia-southeast1-b', not requested zone 'asia-southeast1-a'" "install.sh reports cross-zone mismatch before provisioning"
+  assert_not_contains "${RUN_OUTPUT}" "Provisioning instance through template-backed flow..." "install.sh does not enter create path for cross-zone existing instance"
+
+  local log_content
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute instances create oc-main" "install.sh does not emit create command for cross-zone existing instance"
+}
+
 test_install_reuse_eligibility_guardrails() {
   local mock_dir
   mock_dir="$(new_mock_env install-reuse-eligibility)"
@@ -711,6 +733,7 @@ main() {
   test_install_prompt_and_nonprompt_behavior
   test_install_readiness_gate_dry_run_contract
   test_install_firewall_preflight_predicate
+  test_install_cross_zone_existing_instance_guard
   test_install_reuse_eligibility_guardrails
   test_install_ssh_handoff_contract_and_failure_summary
   test_cloud_nat_idempotent_flow

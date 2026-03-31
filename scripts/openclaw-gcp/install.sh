@@ -215,13 +215,6 @@ read_instance_zone() {
     --format='value(zone.basename())' 2>/dev/null | head -n1 || true
 }
 
-instance_exists() {
-  gcloud compute instances describe "${INSTANCE_NAME}" \
-    --project "${PROJECT_ID}" \
-    --zone "${ZONE}" \
-    --format='value(name)' >/dev/null 2>&1
-}
-
 read_instance_metadata_value() {
   local metadata_key="$1"
   gcloud compute instances describe "${INSTANCE_NAME}" \
@@ -565,7 +558,13 @@ fi
 
 run_preflight
 
-if instance_exists; then
+INSTANCE_DISCOVERED_ZONE="$(read_instance_zone)"
+if [[ -n "${INSTANCE_DISCOVERED_ZONE}" ]]; then
+  if [[ "${INSTANCE_DISCOVERED_ZONE}" != "${ZONE}" ]]; then
+    fail_preflight \
+      "instance '${INSTANCE_NAME}' already exists in zone '${INSTANCE_DISCOVERED_ZONE}', not requested zone '${ZONE}'" \
+      "rerun with --zone ${INSTANCE_DISCOVERED_ZONE} or choose a different --instance-name"
+  fi
   INSTANCE_REUSED="true"
   check_existing_instance_eligibility
   echo "Reusing existing instance: ${INSTANCE_NAME}"
