@@ -265,14 +265,22 @@ qualify_template_metadata_gate() {
   local key=""
   local value=""
   local rest=""
+  local i=0
+  local matched_index=-1
   local expected=""
-  declare -A required_pairs=(
-    [startup_script_source]="${STARTUP_SOURCE_EXPECTED}"
-    [startup_profile]="${STARTUP_PROFILE_EXPECTED}"
-    [startup_contract_version]="${STARTUP_CONTRACT_VERSION_EXPECTED}"
-    [startup_ready_sentinel]="${STARTUP_READY_SENTINEL_EXPECTED}"
+  local required_keys=(
+    "startup_script_source"
+    "startup_profile"
+    "startup_contract_version"
+    "startup_ready_sentinel"
   )
-  declare -A seen_pairs=()
+  local required_values=(
+    "${STARTUP_SOURCE_EXPECTED}"
+    "${STARTUP_PROFILE_EXPECTED}"
+    "${STARTUP_CONTRACT_VERSION_EXPECTED}"
+    "${STARTUP_READY_SENTINEL_EXPECTED}"
+  )
+  local seen_flags=("false" "false" "false" "false")
 
   if ! output="$(
     gcloud compute instance-templates describe "${TEMPLATE_NAME}" \
@@ -297,31 +305,43 @@ qualify_template_metadata_gate() {
     IFS=$'\t' read -r key value rest <<<"${row}"
     [[ -n "${key}" ]] || continue
 
-    if [[ -v "required_pairs[${key}]" ]]; then
+    matched_index=-1
+    i=0
+    while (( i < ${#required_keys[@]} )); do
+      if [[ "${required_keys[i]}" == "${key}" ]]; then
+        matched_index="${i}"
+        break
+      fi
+      i=$((i + 1))
+    done
+
+    if (( matched_index >= 0 )); then
       [[ -z "${rest}" ]] || fail_qualification \
         "template-startup-contract" \
         "ambiguous metadata row for ${key}: ${row}" \
         "ensure required metadata keys have a single exact value"
-      if [[ -v "seen_pairs[${key}]" ]]; then
+      if [[ "${seen_flags[matched_index]}" == "true" ]]; then
         fail_qualification \
           "template-startup-contract" \
           "duplicate metadata key detected: ${key}" \
           "remove duplicate startup metadata entries and retry"
       fi
-      expected="${required_pairs[${key}]}"
+      expected="${required_values[matched_index]}"
       [[ "${value}" == "${expected}" ]] || fail_qualification \
         "template-startup-contract" \
         "metadata mismatch for ${key} (expected=${expected}, actual=${value:-unset})" \
         "update template metadata to match the OpenClaw startup contract and retry"
-      seen_pairs["${key}"]="true"
+      seen_flags[matched_index]="true"
     fi
   done <<<"${output}"
 
-  for key in "${!required_pairs[@]}"; do
-    [[ -v "seen_pairs[${key}]" ]] || fail_qualification \
+  i=0
+  while (( i < ${#required_keys[@]} )); do
+    [[ "${seen_flags[i]}" == "true" ]] || fail_qualification \
       "template-startup-contract" \
-      "required metadata key missing: ${key}" \
+      "required metadata key missing: ${required_keys[i]}" \
       "recreate or repair template metadata with the required startup contract keys"
+    i=$((i + 1))
   done
 }
 
@@ -423,6 +443,93 @@ run_phase1_qualification_checks() {
   echo "Qualification checks passed."
 }
 
+render_command_string() {
+  local out=""
+  local token=""
+  for token in "$@"; do
+    printf -v out '%s %q' "${out}" "${token}"
+  done
+  echo "${out# }"
+}
+
+run_delete_step() {
+  local resource_label="$1"
+  local retry_command="$2"
+  shift 2
+  local exit_code=0
+  local index="${DELETE_STEP_INDEX}"
+
+  printf 'Deleting %s...\n' "${resource_label}"
+  if "$@"; then
+    DELETE_STATUS[index]="succeeded"
+    DELETE_DETAIL[index]="deleted successfully"
+    DELETE_RETRY[index]="${retry_command}"
+  else
+    exit_code=$?
+    DELETE_STATUS[index]="failed"
+    DELETE_DETAIL[index]="delete command exited with status ${exit_code}"
+    DELETE_RETRY[index]="${retry_command}"
+    DELETE_ANY_FAILURE="true"
+  fi
+  DELETE_STEP_INDEX=$((DELETE_STEP_INDEX + 1))
+}
+
+execute_phase1_teardown() {
+  local instance_cmd=(
+    gcloud compute instances delete "${INSTANCE_NAME}"
+    --project "${PROJECT_ID}"
+    --zone "${ZONE}"
+    --quiet
+  )
+  local template_cmd=(
+    gcloud compute instance-templates delete "${TEMPLATE_NAME}"
+    --project "${PROJECT_ID}"
+    --region "${REGION}"
+    --quiet
+  )
+  local nat_cmd=(
+    gcloud compute routers nats delete "${NAT_NAME}"
+    --project "${PROJECT_ID}"
+    --router "${ROUTER_NAME}"
+    --region "${REGION}"
+    --quiet
+  )
+  local router_cmd=(
+    gcloud compute routers delete "${ROUTER_NAME}"
+    --project "${PROJECT_ID}"
+    --region "${REGION}"
+    --quiet
+  )
+
+  echo
+  echo "Starting Phase 1 teardown..."
+  run_delete_step "instance:${INSTANCE_NAME}" "$(render_command_string "${instance_cmd[@]}")" "${instance_cmd[@]}"
+  run_delete_step "template:${TEMPLATE_NAME}" "$(render_command_string "${template_cmd[@]}")" "${template_cmd[@]}"
+  run_delete_step "nat:${NAT_NAME}" "$(render_command_string "${nat_cmd[@]}")" "${nat_cmd[@]}"
+  run_delete_step "router:${ROUTER_NAME}" "$(render_command_string "${router_cmd[@]}")" "${router_cmd[@]}"
+}
+
+print_teardown_summary() {
+  local i=0
+  local failed_count=0
+
+  echo
+  echo "Phase 1 teardown summary:"
+  while (( i < ${#DELETE_RESOURCE[@]} )); do
+    echo "  - ${DELETE_RESOURCE[i]} => ${DELETE_STATUS[i]} (${DELETE_DETAIL[i]})"
+    if [[ "${DELETE_STATUS[i]}" == "failed" ]]; then
+      failed_count=$((failed_count + 1))
+      echo "    manual cleanup hint: ${DELETE_RETRY[i]}"
+    fi
+    i=$((i + 1))
+  done
+
+  if (( failed_count > 0 )); then
+    echo
+    echo "Manual cleanup is required for ${failed_count} failed resource(s)."
+  fi
+}
+
 require_typed_confirmation() {
   local response=""
   local expected="${CONFIRM_TOKEN} ${PROJECT_ID}/${INSTANCE_NAME}"
@@ -465,6 +572,17 @@ done
 resolve_interactive_mode
 resolve_project_id
 validate_zone_region_pair
+DELETE_RESOURCE=(
+  "instance:${INSTANCE_NAME}"
+  "template:${TEMPLATE_NAME}"
+  "nat:${NAT_NAME}"
+  "router:${ROUTER_NAME}"
+)
+DELETE_STATUS=("skipped" "skipped" "skipped" "skipped")
+DELETE_DETAIL=("not attempted" "not attempted" "not attempted" "not attempted")
+DELETE_RETRY=("" "" "" "")
+DELETE_ANY_FAILURE="false"
+DELETE_STEP_INDEX=0
 
 print_plan_summary
 print_planned_commands
@@ -477,7 +595,12 @@ fi
 
 run_phase1_qualification_checks
 require_typed_confirmation
+execute_phase1_teardown
+print_teardown_summary
 
 echo
-echo "Confirmation gate passed."
-echo "Phase 1 scaffold complete: qualification and teardown execution are handled in subsequent stories."
+if [[ "${DELETE_ANY_FAILURE}" == "true" ]]; then
+  echo "Destroy completed with failures."
+  exit 1
+fi
+echo "Destroy completed successfully."
