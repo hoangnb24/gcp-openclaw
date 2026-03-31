@@ -306,6 +306,25 @@ if [[ "$*" == *"compute instances describe"* && "$*" == *"--flatten=metadata.ite
 fi
 
 if [[ "$*" == *"compute instances describe"* && "$*" == *"--flatten=disks[]"* && "$*" == *"--format=value(disks.boot,disks.autoDelete)"* ]]; then
+  describe_instance=""
+  for ((i=1; i <= $#; i++)); do
+    if [[ "${!i}" == "describe" ]]; then
+      next=$((i + 1))
+      describe_instance="${!next}"
+      break
+    fi
+  done
+  if [[ "${describe_instance}" == "${MOCK_CLONE_INSTANCE_NAME:-oc-clone}" ]]; then
+    if [[ "${MOCK_DESTROY_CLONE_DESCRIBE_FAIL:-false}" == "true" ]]; then
+      exit 1
+    fi
+    if [[ -n "${MOCK_DESTROY_CLONE_DISK_ROWS:-}" ]]; then
+      printf '%b\n' "${MOCK_DESTROY_CLONE_DISK_ROWS}"
+      exit 0
+    fi
+    printf '%s\n' "true true"
+    exit 0
+  fi
   if [[ "${MOCK_DESTROY_INSTANCE_DESCRIBE_FAIL:-false}" == "true" ]]; then
     exit 1
   fi
@@ -339,6 +358,18 @@ if [[ "$*" == *"compute resource-policies describe"* ]]; then
     exit 0
   fi
   exit 1
+fi
+
+if [[ "$*" == *"compute disks describe"* && "$*" == *"--flatten=resourcePolicies[]"* && "$*" == *"--format=value(resourcePolicies.basename())"* ]]; then
+  if [[ "${MOCK_DESTROY_SNAPSHOT_DISK_DESCRIBE_FAIL:-false}" == "true" ]]; then
+    exit 1
+  fi
+  if [[ -n "${MOCK_DESTROY_SNAPSHOT_POLICY_ROWS:-}" ]]; then
+    printf '%b\n' "${MOCK_DESTROY_SNAPSHOT_POLICY_ROWS}"
+    exit 0
+  fi
+  printf '%s\n' "${MOCK_DESTROY_SNAPSHOT_POLICY_NAME:-oc-daily-snapshots}"
+  exit 0
 fi
 
 if [[ "$*" == *"compute routers describe"* ]]; then
@@ -387,6 +418,22 @@ if [[ "$*" == *"compute instances delete"* ]]; then
   exit 0
 fi
 
+if [[ "$*" == *"compute disks remove-resource-policies"* ]]; then
+  if [[ "${MOCK_DESTROY_FAIL_SNAPSHOT_DETACH:-false}" == "true" ]]; then
+    echo "mocked snapshot detach failure" >&2
+    exit 45
+  fi
+  exit 0
+fi
+
+if [[ "$*" == *"compute resource-policies delete"* ]]; then
+  if [[ "${MOCK_DESTROY_FAIL_SNAPSHOT_DELETE:-false}" == "true" ]]; then
+    echo "mocked snapshot delete failure" >&2
+    exit 46
+  fi
+  exit 0
+fi
+
 if [[ "$*" == *"compute instance-templates delete"* ]]; then
   if [[ "${MOCK_DESTROY_FAIL_TEMPLATE_DELETE:-false}" == "true" ]]; then
     echo "mocked template delete failure" >&2
@@ -407,6 +454,22 @@ if [[ "$*" == *"compute routers delete"* ]]; then
   if [[ "${MOCK_DESTROY_FAIL_ROUTER_DELETE:-false}" == "true" ]]; then
     echo "mocked router delete failure" >&2
     exit 44
+  fi
+  exit 0
+fi
+
+if [[ "$*" == *"compute machine-images describe"* && "$*" == *"--format=value(name)"* ]]; then
+  if [[ "${MOCK_DESTROY_MACHINE_IMAGE_DESCRIBE_FAIL:-false}" == "true" ]]; then
+    exit 1
+  fi
+  printf '%s\n' "${MOCK_DESTROY_MACHINE_IMAGE_DESCRIBE_NAME:-${MOCK_DESTROY_MACHINE_IMAGE_NAME:-oc-image-20260324-001}}"
+  exit 0
+fi
+
+if [[ "$*" == *"compute machine-images delete"* ]]; then
+  if [[ "${MOCK_DESTROY_FAIL_MACHINE_IMAGE_DELETE:-false}" == "true" ]]; then
+    echo "mocked machine image delete failure" >&2
+    exit 47
   fi
   exit 0
 fi
@@ -903,11 +966,21 @@ test_destroy_help_parser_and_confirmation_contract() {
   assert_status 0 "destroy.sh --help renders usage"
   assert_contains "${RUN_OUTPUT}" "Destroy the standard OpenClaw GCP deployment by exact resource names." "destroy.sh help describes exact-name contract"
   assert_contains "${RUN_OUTPUT}" "--dry-run prints plan and commands without mutating resources" "destroy.sh help describes dry-run safety contract"
+  assert_contains "${RUN_OUTPUT}" "--snapshot-policy-name <name>" "destroy.sh help includes snapshot policy extra flag"
+  assert_contains "${RUN_OUTPUT}" "--clone-instance-name <name>" "destroy.sh help includes clone extra flag"
+  assert_contains "${RUN_OUTPUT}" "--machine-image-name <name>" "destroy.sh help includes machine image extra flag"
 
   run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" --project-id
   assert_status 1 "destroy.sh rejects missing values for value-taking flags"
   assert_contains "${RUN_OUTPUT}" "Error: missing value for --project-id" "destroy.sh reports a controlled missing-value parser error"
   assert_not_contains "${RUN_OUTPUT}" "shift count out of range" "destroy.sh avoids raw shell shift failures for missing option values"
+
+  run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --snapshot-policy-disk oc-main \
+    --dry-run
+  assert_status 1 "destroy.sh requires snapshot-policy-name when snapshot disk context is passed"
+  assert_contains "${RUN_OUTPUT}" "--snapshot-policy-disk requires --snapshot-policy-name" "destroy.sh enforces snapshot disk parser guardrail"
 
   run_capture bash -c "printf 'NOPE\n' | env PATH=\"${mock_dir}/bin:\${PATH}\" MOCK_GCLOUD_LOG=\"${mock_dir}/gcloud.log\" bash \"${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh\" --project-id hoangnb-openclaw --interactive"
   assert_status 1 "destroy.sh interactive mode requires typed confirmation"
@@ -939,11 +1012,28 @@ test_destroy_dry_run_contract() {
   assert_contains "${RUN_OUTPUT}" "gcloud compute routers delete oc-router" "destroy.sh dry-run prints planned router delete command"
   assert_contains "${RUN_OUTPUT}" "Dry-run mode: no resources were modified." "destroy.sh dry-run reports no mutations"
   assert_not_contains "${RUN_OUTPUT}" "Running Phase 1 qualification checks..." "destroy.sh dry-run exits before qualification checks"
+  assert_not_contains "${RUN_OUTPUT}" "snapshot_policy_name:" "destroy.sh default dry-run omits extra-resource rows when extras are not requested"
 
   local log_content
   log_content="$(cat "${mock_dir}/gcloud.log" 2>/dev/null || true)"
   assert_not_contains "${log_content}" "GCLOUD compute instances describe" "destroy.sh dry-run does not invoke instance qualification describes"
   assert_not_contains "${log_content}" "GCLOUD compute instances delete" "destroy.sh dry-run emits no delete command"
+
+  run_capture run_with_mock "${mock_dir}" \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --snapshot-policy-name oc-daily-snapshots \
+    --snapshot-policy-disk oc-main \
+    --machine-image-name oc-image-20260324-001 \
+    --clone-instance-name oc-clone \
+    --dry-run
+  assert_status 0 "destroy.sh extra-resource dry-run succeeds"
+  assert_contains "${RUN_OUTPUT}" "Phase 2 explicit extra targets:" "destroy.sh dry-run prints explicit extra targets when named"
+  assert_contains "${RUN_OUTPUT}" "snapshot_policy_name: oc-daily-snapshots" "destroy.sh dry-run shows named snapshot policy"
+  assert_contains "${RUN_OUTPUT}" "clone_instance_name: oc-clone" "destroy.sh dry-run shows named clone target"
+  assert_contains "${RUN_OUTPUT}" "machine_image_name: oc-image-20260324-001" "destroy.sh dry-run shows named machine image target"
+  assert_contains "${RUN_OUTPUT}" "gcloud compute disks remove-resource-policies oc-main" "destroy.sh dry-run prints planned snapshot detach command when disk context is provided"
+  assert_contains "${RUN_OUTPUT}" "gcloud compute machine-images delete oc-image-20260324-001" "destroy.sh dry-run prints planned machine-image delete command when named"
 }
 
 test_destroy_qualification_failures_block_deletes() {
@@ -1042,6 +1132,79 @@ test_destroy_delete_order_and_mixed_failure_summary() {
   assert_contains "${log_content}" "GCLOUD compute routers delete oc-router" "destroy.sh still issues router delete in mixed-failure run"
 }
 
+test_destroy_phase2_extra_resource_contract() {
+  local mock_dir
+  local log_content
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  mock_dir="$(new_mock_env destroy-phase2-snapshot-mismatch)"
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_DESTROY_SNAPSHOT_POLICY_ROWS="some-other-policy" \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --snapshot-policy-name oc-daily-snapshots \
+    --snapshot-policy-disk oc-main \
+    --yes
+  assert_status 1 "destroy.sh fails closed when named snapshot policy is not attached to the named disk"
+  assert_contains "${RUN_OUTPUT}" "Qualification failed [snapshot-policy-attachment]" "destroy.sh reports snapshot attachment predicate failure"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute resource-policies delete oc-daily-snapshots" "snapshot attachment mismatch emits no snapshot delete command"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete oc-main" "snapshot attachment mismatch blocks Phase 1 deletes"
+
+  mock_dir="$(new_mock_env destroy-phase2-clone-mismatch)"
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_CLONE_INSTANCE_NAME=oc-clone \
+    MOCK_DESTROY_CLONE_DISK_ROWS="true false" \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --clone-instance-name oc-clone \
+    --yes
+  assert_status 1 "destroy.sh exits non-zero when clone safety predicate fails"
+  assert_contains "${RUN_OUTPUT}" "clone-instance:oc-clone => failed (disk predicate mismatch" "destroy.sh reports clone disk safety mismatch in summary"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_not_contains "${log_content}" "GCLOUD compute instances delete oc-clone" "clone mismatch emits no clone delete command"
+
+  mock_dir="$(new_mock_env destroy-phase2-success-order)"
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_CLONE_INSTANCE_NAME=oc-clone \
+    MOCK_DESTROY_MACHINE_IMAGE_NAME=oc-image-20260324-001 \
+    MOCK_DESTROY_MACHINE_IMAGE_DESCRIBE_NAME=oc-image-20260324-001 \
+    MOCK_DESTROY_SNAPSHOT_POLICY_NAME=oc-daily-snapshots \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --snapshot-policy-name oc-daily-snapshots \
+    --snapshot-policy-disk oc-main \
+    --clone-instance-name oc-clone \
+    --machine-image-name oc-image-20260324-001 \
+    --yes
+  assert_status 0 "destroy.sh succeeds when all explicit Phase 2 extra resources delete cleanly"
+  assert_contains "${RUN_OUTPUT}" "snapshot-policy:oc-daily-snapshots => succeeded" "destroy.sh summary marks snapshot policy cleanup succeeded"
+  assert_contains "${RUN_OUTPUT}" "clone-instance:oc-clone => succeeded" "destroy.sh summary marks clone cleanup succeeded"
+  assert_contains "${RUN_OUTPUT}" "machine-image:oc-image-20260324-001 => succeeded" "destroy.sh summary marks machine image cleanup succeeded"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_ordered_line_patterns "${log_content}" "GCLOUD compute disks remove-resource-policies oc-main" "GCLOUD compute instances delete oc-main" "snapshot detach runs before core instance delete"
+  assert_ordered_line_patterns "${log_content}" "GCLOUD compute routers delete oc-router" "GCLOUD compute instances describe oc-clone" "clone cleanup starts after core stack completes"
+  assert_ordered_line_patterns "${log_content}" "GCLOUD compute instances delete oc-clone" "GCLOUD compute machine-images describe oc-image-20260324-001" "machine-image cleanup runs after clone cleanup"
+
+  mock_dir="$(new_mock_env destroy-phase2-mixed-failure-continues)"
+  run_capture run_with_mock "${mock_dir}" \
+    MOCK_CLONE_INSTANCE_NAME=oc-clone \
+    MOCK_DESTROY_CLONE_DISK_ROWS="true false" \
+    MOCK_DESTROY_MACHINE_IMAGE_NAME=oc-image-20260324-001 \
+    MOCK_DESTROY_MACHINE_IMAGE_DESCRIBE_NAME=oc-image-20260324-001 \
+    bash "${ROOT_DIR}/scripts/openclaw-gcp/destroy.sh" \
+    --project-id hoangnb-openclaw \
+    --clone-instance-name oc-clone \
+    --machine-image-name oc-image-20260324-001 \
+    --yes
+  assert_status 1 "destroy.sh mixed extra-resource failure exits non-zero"
+  assert_contains "${RUN_OUTPUT}" "clone-instance:oc-clone => failed" "destroy.sh reports clone failure in mixed extra-resource run"
+  assert_contains "${RUN_OUTPUT}" "machine-image:oc-image-20260324-001 => succeeded" "destroy.sh still runs later machine-image cleanup after clone failure"
+  assert_contains "${RUN_OUTPUT}" "Destroy completed with failures." "destroy.sh prints mixed-failure completion banner for extra-resource failures"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_contains "${log_content}" "GCLOUD compute machine-images delete oc-image-20260324-001" "destroy.sh continues to machine-image delete after clone failure"
+}
+
 test_negative_guards() {
   local startup_file="${TMP_DIR}/startup.sh"
   TESTS_RUN=$((TESTS_RUN + 1))
@@ -1131,6 +1294,7 @@ main() {
   test_destroy_dry_run_contract
   test_destroy_qualification_failures_block_deletes
   test_destroy_delete_order_and_mixed_failure_summary
+  test_destroy_phase2_extra_resource_contract
   test_negative_guards
 
   if (( TESTS_FAILED > 0 )); then
