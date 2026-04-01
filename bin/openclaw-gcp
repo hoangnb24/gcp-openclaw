@@ -31,6 +31,12 @@ DOWN_FORCE_INTERACTIVE="false"
 DOWN_FORCE_NON_INTERACTIVE="false"
 INSTALL_PASSTHROUGH_ARGS=()
 DESTROY_PASSTHROUGH_ARGS=()
+RESOLVED_STACK_ID=""
+RECOVERY_NOTE=""
+RECOVERY_CANDIDATES_CSV=""
+RECOVERY_PARTIALS_CSV=""
+RECOVERY_CANDIDATES_NL=""
+RECOVERY_PARTIALS_NL=""
 
 usage() {
   cat <<EOF
@@ -330,14 +336,14 @@ resolve_stack_id_for_up_or_status() {
   local explicit="${1:-}" remembered=""
   if [[ -n "${explicit}" ]]; then
     SELECTION_SOURCE="explicit"
-    oc_stack_require_id "${explicit}"
+    RESOLVED_STACK_ID="$(oc_stack_require_id "${explicit}")"
     return 0
   fi
 
   remembered="$(oc_stack_state_get_or_empty CURRENT_STACK_ID)"
   if [[ -n "${remembered}" ]]; then
     SELECTION_SOURCE="current-state"
-    oc_stack_require_id "${remembered}"
+    RESOLVED_STACK_ID="$(oc_stack_require_id "${remembered}")"
     return 0
   fi
 
@@ -348,11 +354,160 @@ resolve_stack_id_for_up_or_status() {
   die "no stack ID provided and no CURRENT_STACK_ID found in $(oc_stack_state_file)"
 }
 
+join_lines_with() {
+  local delimiter="$1"
+  local input="${2:-}"
+  printf '%s\n' "${input}" | sed '/^$/d' | paste -sd "${delimiter}" -
+}
+
+stack_ids_to_csv() {
+  local input="${1:-}"
+  join_lines_with "," "${input}"
+}
+
+stack_ids_to_space_list() {
+  local input="${1:-}"
+  local joined
+  joined="$(join_lines_with " " "${input}")"
+  if [[ -n "${joined}" ]]; then
+    printf '%s\n' "${joined}"
+    return 0
+  fi
+  printf '<none>\n'
+}
+
+normalize_unique_stack_ids() {
+  local raw normalized
+  while IFS= read -r raw; do
+    [[ -n "${raw}" ]] || continue
+    normalized="$(oc_stack_normalize_id "${raw}" 2>/dev/null || true)"
+    [[ -n "${normalized}" && "${normalized}" == "${raw}" ]] || continue
+    printf '%s\n' "${normalized}"
+  done | sort -u
+}
+
+discover_recovery_stack_ids_nl() {
+  local resource_kind="$1"
+  local project_id="$2"
+  local filter
+  local output=""
+
+  filter="labels.${OPENCLAW_STACK_LABEL_MANAGED_KEY}=true AND labels.${OPENCLAW_STACK_LABEL_TOOL_KEY}=${OPENCLAW_STACK_TOOL} AND labels.${OPENCLAW_STACK_LABEL_STACK_KEY}:*"
+
+  case "${resource_kind}" in
+    instance)
+      output="$(
+        gcloud compute instances list \
+          --project "${project_id}" \
+          --filter "${filter}" \
+          --format="value(labels.${OPENCLAW_STACK_LABEL_STACK_KEY})" 2>/dev/null || true
+      )"
+      ;;
+    template)
+      output="$(
+        gcloud compute instance-templates list \
+          --project "${project_id}" \
+          --filter "${filter}" \
+          --format="value(labels.${OPENCLAW_STACK_LABEL_STACK_KEY})" 2>/dev/null || true
+      )"
+      ;;
+    *)
+      die "unknown recovery resource kind: ${resource_kind}"
+      ;;
+  esac
+
+  normalize_unique_stack_ids <<<"${output}"
+}
+
+recover_stack_candidates() {
+  local project_id="$1"
+  local instance_ids template_ids instance_only template_only
+
+  instance_ids="$(discover_recovery_stack_ids_nl "instance" "${project_id}")"
+  template_ids="$(discover_recovery_stack_ids_nl "template" "${project_id}")"
+
+  RECOVERY_CANDIDATES_NL="$(comm -12 <(printf '%s\n' "${instance_ids}" | sed '/^$/d' | sort -u) <(printf '%s\n' "${template_ids}" | sed '/^$/d' | sort -u))"
+  instance_only="$(comm -23 <(printf '%s\n' "${instance_ids}" | sed '/^$/d' | sort -u) <(printf '%s\n' "${template_ids}" | sed '/^$/d' | sort -u) | sed 's/$/:instance/')"
+  template_only="$(comm -13 <(printf '%s\n' "${instance_ids}" | sed '/^$/d' | sort -u) <(printf '%s\n' "${template_ids}" | sed '/^$/d' | sort -u) | sed 's/$/:template/')"
+  RECOVERY_PARTIALS_NL="$(printf '%s\n%s\n' "${instance_only}" "${template_only}" | sed '/^$/d' | sort -u)"
+}
+
+resolve_stack_id_for_status() {
+  local explicit="${1:-}"
+  local remembered="${2:-}"
+  local project_id="${3:-}"
+  local candidate_count partial_count sole_candidate
+
+  RECOVERY_NOTE=""
+  RECOVERY_CANDIDATES_CSV=""
+  RECOVERY_PARTIALS_CSV=""
+  RECOVERY_CANDIDATES_NL=""
+  RECOVERY_PARTIALS_NL=""
+
+  if [[ -n "${explicit}" ]]; then
+    SELECTION_SOURCE="explicit"
+    RESOLVED_STACK_ID="$(oc_stack_require_id "${explicit}")"
+    return 0
+  fi
+
+  # Without gcloud+project context, keep existing local-state behavior for status.
+  if ! command_exists gcloud || [[ -z "${project_id}" ]]; then
+    if [[ -n "${remembered}" ]]; then
+      SELECTION_SOURCE="current-state"
+      RESOLVED_STACK_ID="$(oc_stack_require_id "${remembered}")"
+      return 0
+    fi
+    die "no stack ID provided and no CURRENT_STACK_ID found in $(oc_stack_state_file)"
+  fi
+
+  recover_stack_candidates "${project_id}"
+  RECOVERY_CANDIDATES_CSV="$(stack_ids_to_csv "${RECOVERY_CANDIDATES_NL}")"
+  RECOVERY_PARTIALS_CSV="$(stack_ids_to_csv "${RECOVERY_PARTIALS_NL}")"
+  candidate_count="$(printf '%s\n' "${RECOVERY_CANDIDATES_NL}" | sed '/^$/d' | wc -l | tr -d ' ')"
+  partial_count="$(printf '%s\n' "${RECOVERY_PARTIALS_NL}" | sed '/^$/d' | wc -l | tr -d ' ')"
+  sole_candidate="$(printf '%s\n' "${RECOVERY_CANDIDATES_NL}" | sed '/^$/d' | head -n1)"
+
+  if (( partial_count > 0 )); then
+    die "status recovery failed: labeled anchors disagree (${RECOVERY_PARTIALS_CSV}). Pass --stack-id explicitly."
+  fi
+
+  if [[ -n "${remembered}" ]] && printf '%s\n' "${RECOVERY_CANDIDATES_NL}" | sed '/^$/d' | grep -Fxq "${remembered}"; then
+    SELECTION_SOURCE="current-state"
+    if (( candidate_count == 1 )); then
+      RECOVERY_NOTE="current stack verified against one recovered candidate."
+    else
+      RECOVERY_NOTE="current stack is present in recovered candidates."
+    fi
+    RESOLVED_STACK_ID="$(oc_stack_require_id "${remembered}")"
+    return 0
+  fi
+
+  if (( candidate_count == 1 )); then
+    SELECTION_SOURCE="recovered-single-candidate"
+    if [[ -n "${remembered}" ]]; then
+      RECOVERY_NOTE="current state '${remembered}' appears stale; status recovered '${sole_candidate}' from labels."
+    else
+      RECOVERY_NOTE="status recovered '${sole_candidate}' from labels because local current state is missing."
+    fi
+    RESOLVED_STACK_ID="${sole_candidate}"
+    return 0
+  fi
+
+  if (( candidate_count == 0 )); then
+    if [[ -n "${remembered}" ]]; then
+      die "status recovery found no recoverable stack candidates in project '${project_id}' and current state '${remembered}' appears stale. Pass --stack-id explicitly."
+    fi
+    die "status recovery found no recoverable stack candidates in project '${project_id}'. Pass --stack-id explicitly."
+  fi
+
+  die "status recovery is ambiguous in project '${project_id}' (candidates: ${RECOVERY_CANDIDATES_CSV}). Pass --stack-id explicitly."
+}
+
 resolve_stack_id_for_down() {
   local explicit="${1:-}" remembered=""
   if [[ -n "${explicit}" ]]; then
     SELECTION_SOURCE="explicit"
-    oc_stack_require_id "${explicit}"
+    RESOLVED_STACK_ID="$(oc_stack_require_id "${explicit}")"
     return 0
   fi
 
@@ -360,7 +515,7 @@ resolve_stack_id_for_down() {
     remembered="$(oc_stack_state_get_or_empty CURRENT_STACK_ID)"
     if [[ -n "${remembered}" ]]; then
       SELECTION_SOURCE="current-state"
-      oc_stack_require_id "${remembered}"
+      RESOLVED_STACK_ID="$(oc_stack_require_id "${remembered}")"
       return 0
     fi
   fi
@@ -506,7 +661,8 @@ run_up() {
   local -a install_cmd
 
   parse_up_args "$@"
-  STACK_ID="$(resolve_stack_id_for_up_or_status "${STACK_ID}")"
+  resolve_stack_id_for_up_or_status "${STACK_ID}"
+  STACK_ID="${RESOLVED_STACK_ID}"
   resolved_project="$(resolve_project_context)"
   resolved_region="$(resolve_region_context)"
   resolved_zone="$(resolve_zone_context "${resolved_region}")"
@@ -562,7 +718,6 @@ run_status() {
   local verified_lifecycle=""
 
   parse_common_args "$@"
-  STACK_ID="$(resolve_stack_id_for_up_or_status "${STACK_ID}")"
   resolved_project="$(resolve_project_context)"
   resolved_region="$(resolve_region_context)"
   resolved_zone="$(resolve_zone_context "${resolved_region}")"
@@ -573,6 +728,8 @@ run_status() {
   state_zone="$(oc_stack_state_get_or_empty LAST_ZONE)"
   state_lifecycle="$(oc_stack_state_get_or_empty LIFECYCLE)"
   [[ -z "${state_lifecycle}" ]] || LIFECYCLE="${state_lifecycle}"
+  resolve_stack_id_for_status "${STACK_ID}" "${state_stack_id}" "${resolved_project}"
+  STACK_ID="${RESOLVED_STACK_ID}"
 
   instance_name="$(oc_stack_instance_name "${STACK_ID}")"
   template_name="$(oc_stack_template_name "${STACK_ID}")"
@@ -664,6 +821,14 @@ Local Convenience State
   last_zone: ${state_zone:-<none>}
 EOF
 
+  if [[ -n "${RECOVERY_NOTE}" || -n "${RECOVERY_CANDIDATES_CSV}" || -n "${RECOVERY_PARTIALS_CSV}" ]]; then
+    echo
+    echo "Recovery Path"
+    echo "  note: ${RECOVERY_NOTE:-<none>}"
+    echo "  recovered_candidates: $(stack_ids_to_space_list "${RECOVERY_CANDIDATES_NL}")"
+    echo "  partial_anchor_ids: $(stack_ids_to_space_list "${RECOVERY_PARTIALS_NL}")"
+  fi
+
   if [[ -n "${context_note}" ]]; then
     echo
     echo "Note: ${context_note}"
@@ -676,7 +841,8 @@ run_down() {
   local -a destroy_cmd
 
   parse_down_args "$@"
-  STACK_ID="$(resolve_stack_id_for_down "${STACK_ID}")"
+  resolve_stack_id_for_down "${STACK_ID}"
+  STACK_ID="${RESOLVED_STACK_ID}"
   resolved_project="$(resolve_project_context)"
   resolved_region="$(resolve_region_context)"
   resolved_zone="$(resolve_zone_context "${resolved_region}")"
