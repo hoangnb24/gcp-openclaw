@@ -18,6 +18,8 @@ Inside Cloud Shell, the primary flow is:
 `up` is the real bring-up action.
 `status` explains both the remembered local stack context and the GCP-backed ownership anchors.
 `down` tears down the same stack contract without making you retype router/template/NAT names manually.
+Phase 1 expects an existing accessible GCP project and does not create new projects for you.
+Set one with `gcloud config set project <PROJECT_ID>` or pass `--project-id <PROJECT_ID>` to `up`.
 
 ## Cloud Shell Persistence And State
 
@@ -44,7 +46,8 @@ The durable ownership truth is the label set on the stack's instance/template an
 - `openclaw_tool=openclaw-gcp`
 - `openclaw_lifecycle=persistent`
 
-If local state disappears, becomes stale, or you use ephemeral Cloud Shell, the wrapper still verifies the GCP anchors before it will destroy anything.
+If local state disappears, becomes stale, or you use ephemeral Cloud Shell, `status` now attempts project-scoped label recovery first and repairs local state only when one candidate is trustworthy.
+`down` still stays conservative and verifies anchors before it will destroy anything.
 
 ## Stack Command Surface
 
@@ -62,6 +65,8 @@ Purpose:
 Behavior:
 - never provisions infrastructure by itself
 - can immediately chain into `up` if the operator confirms
+- reminds the operator that an existing GCP project is required
+- shows the current `gcloud` project when one is already set
 
 ## `up`
 
@@ -90,11 +95,19 @@ Inherited safety/behavior from the existing install engine:
 ```
 
 Behavior:
-- uses the current stack from local state unless `--stack-id` is passed
+- uses `--stack-id` when provided
+- otherwise uses remembered local state when still valid
+- if local state is missing or stale, performs project-scoped recovery from labeled instance/template anchors
 - prints project/region/zone context
 - prints the expected instance/template/router/NAT names for the stack
 - checks whether the instance/template anchors exist and whether their labels match the requested stack
 - checks whether the deterministic router/NAT companions exist
+- repairs `~/.config/openclaw-gcp/current-stack.env` only after exact-one-candidate recovery succeeds
+
+Recovery outcomes:
+- recovered: one trustworthy candidate was found and state was repaired
+- ambiguous: multiple candidates were found, so `--stack-id` is required
+- insufficient context: no stack pointer plus missing project context or missing `gcloud`
 
 Machine-readable mode is also available:
 
@@ -179,8 +192,9 @@ If Cloud Shell opens next month and the convenience file is still present:
 - `./bin/openclaw-gcp down`
 
 If the convenience file is gone or stale:
-- Phase 1 fails closed instead of guessing
-- later recovery work can build on the durable GCP labels safely
+- run `./bin/openclaw-gcp status --project-id <PROJECT_ID>` to trigger recovery-aware status
+- expect fail-closed ambiguity when more than one stack candidate exists
+- pass `--stack-id` explicitly when status reports ambiguous or insufficient context
 
 ## Day-2 Docs
 

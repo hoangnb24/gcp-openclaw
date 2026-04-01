@@ -457,7 +457,10 @@ resolve_stack_id_for_status() {
       RESOLVED_STACK_ID="$(oc_stack_require_id "${remembered}")"
       return 0
     fi
-    die "no stack ID provided and no CURRENT_STACK_ID found in $(oc_stack_state_file)"
+    if ! command_exists gcloud; then
+      die "status has insufficient context: no --stack-id, no CURRENT_STACK_ID in $(oc_stack_state_file), and gcloud is not available for recovery discovery."
+    fi
+    die "status has insufficient context: no --stack-id, no CURRENT_STACK_ID in $(oc_stack_state_file), and no project context. Pass --project-id or set gcloud project."
   fi
 
   recover_stack_candidates "${project_id}"

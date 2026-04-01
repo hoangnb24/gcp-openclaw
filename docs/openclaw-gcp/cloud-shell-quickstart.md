@@ -54,8 +54,23 @@ Run:
 The welcome flow:
 
 - asks for a stack ID in interactive mode
+- reminds you that this flow expects an existing accessible GCP project
+- shows the current `gcloud` project when one is already set
 - explains the next `up` command
 - stays non-mutating until you explicitly choose to continue
+
+Phase 1 does not create new GCP projects for you.
+Before `up`, either set an existing project:
+
+```sh
+gcloud config set project <PROJECT_ID>
+```
+
+or pass it explicitly:
+
+```sh
+./bin/openclaw-gcp up --stack-id my-stack --project-id <PROJECT_ID>
+```
 
 ## 3. Bring Up One Stack
 
@@ -86,6 +101,12 @@ This shows:
 - the last-known project/region/zone context
 - whether the labeled instance/template anchors exist and match the stack
 - whether the deterministic router/NAT companions exist
+- recovery outcome when local state is missing or stale
+
+Recovery outcomes are explicit:
+- `recovered-single-candidate`: status found one trustworthy stack and repaired local state
+- ambiguous: status found multiple candidates and requires `--stack-id`
+- insufficient context: status needs project context or `gcloud` access to recover
 
 ## 5. Tear The Stack Down
 
@@ -132,11 +153,14 @@ Important caveats:
 
 That is why the local file is only convenience state.
 The durable ownership contract remains the GCP labels on the instance/template anchors.
+If the file is missing or stale, run `./bin/openclaw-gcp status --project-id <PROJECT_ID>` so status can recover from labels when safe.
 
 ## 7. If Auth Or Project Context Is Missing
 
 For non-Google allowlisted repositories, Cloud Shell can open in a temporary environment without automatic access to the user's default credentials.
-If `up` or `status` tells you auth or project context is missing, follow the emitted `gcloud` guidance from the scripts.
+If `status` reports insufficient context, pass `--project-id` or set `gcloud config set project <PROJECT_ID>`.
+If `status` reports ambiguity, pass `--stack-id <STACK_ID>` explicitly.
+If `up` or `status` tells you auth is missing, follow the emitted `gcloud` guidance from the scripts.
 
 The wrapper is intentionally thin.
 It keeps the main UX simple while preserving the existing safety, determinism, and operator guardrails underneath.

@@ -30,6 +30,8 @@ In Cloud Shell, the happy path is:
 `welcome` is non-mutating.
 `up` uses your stack ID to derive the VM, template, router, and NAT names automatically and then delegates to the existing install engine underneath.
 `down` delegates to the existing destroy engine, but only after verifying that the stack's labeled GCP anchors match the stack you asked for.
+Phase 1 expects an existing accessible GCP project and does not create projects for you.
+Set one with `gcloud config set project <PROJECT_ID>` or pass `--project-id <PROJECT_ID>` to `up`.
 
 For the full browser-first walkthrough, see [Cloud Shell quickstart](docs/openclaw-gcp/cloud-shell-quickstart.md).
 
@@ -61,8 +63,11 @@ That file remembers the current stack plus the last-known project, region, and z
 In normal Cloud Shell usage, `$HOME` is persistent, so that file usually survives when you come back later.
 But Cloud Shell itself is still a temporary VM, `gcloud` tab preferences do not persist by default, and ephemeral Cloud Shell sessions can discard local state entirely.
 
-That is why Phase 1 treats local state as convenience only and still verifies the labeled GCP anchors before teardown.
-If local state is gone or stale, later recovery work can build on those labels safely.
+That is why local state stays convenience-only and teardown still verifies labeled GCP anchors first.
+Phase 2 now adds recovery-aware `status` behavior:
+- if exactly one trustworthy label candidate exists, `status` recovers that stack and repairs `current-stack.env`
+- if multiple candidates exist, recovery fails closed and requires `--stack-id`
+- if context is insufficient (for example no project context), `status` tells you exactly what input is missing
 
 ## Primary Commands
 
@@ -72,6 +77,7 @@ If local state is gone or stale, later recovery work can build on those labels s
 
 Non-mutating Cloud Shell guidance.
 In interactive mode it asks for a stack ID and offers to jump straight into `up`.
+It also reminds you that the flow expects an existing GCP project and shows the current `gcloud` project if one is already set.
 
 ```bash
 ./bin/openclaw-gcp up --stack-id my-stack
@@ -86,6 +92,7 @@ After that, the wrapper remembers the current stack in local Cloud Shell state.
 ```
 
 Shows the current or explicit stack, the local convenience state, and whether the stack's GCP anchors exist with matching OpenClaw labels.
+When local state is missing or stale, `status` runs project-scoped label recovery and clearly distinguishes recovered, ambiguous, and insufficient-context outcomes.
 
 ```bash
 ./bin/openclaw-gcp down
