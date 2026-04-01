@@ -1,25 +1,34 @@
 # OpenClaw on GCP
 
-This repository now centers on a one-line, installer-first operator flow for provisioning or reusing an OpenClaw VM on GCP, validating prerequisites, and handing off to the upstream interactive installer over IAP SSH.
+This repository now centers on a Cloud-Shell-first operator flow for provisioning or reusing an OpenClaw VM on GCP, validating prerequisites, and handing off to the upstream interactive installer over IAP SSH.
 
-## Quickstart
+## Cloud Shell Quickstart
+
+[![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://console.cloud.google.com/cloudshell/open?cloudshell_git_repo=https://github.com/hoangnb24/gcp-openclaw&cloudshell_workspace=gcp-openclaw&cloudshell_tutorial=docs/openclaw-gcp/cloud-shell-quickstart.md)
+
+Use the button above to open this repo in Google Cloud Shell with a repo-hosted tutorial.
+The tutorial and welcome flow are non-mutating and guide you toward the Phase 1 stack-native path:
+
+```bash
+bash scripts/openclaw-gcp/cloudshell-welcome.sh
+```
+
+For full browser-first flow details, see [Cloud Shell quickstart](docs/openclaw-gcp/cloud-shell-quickstart.md).
+
+## Direct Installer Entry
+
+The existing installer entrypoint remains available directly:
 
 ```bash
 bash scripts/openclaw-gcp/install.sh
 ```
 
-The installer performs local preflight checks, provisions or reuses the VM through the existing template-backed infrastructure path, runs readiness gating, opens an interactive SSH handoff, and launches:
-
-```bash
-curl -fsSL https://openclaw.ai/install.sh | bash
-```
-
-On successful completion, you remain in the remote VM shell.
-If upstream install fails, the wrapper returns locally with a failure summary and exact log retrieval guidance.
+The installer performs local preflight checks, provisions or reuses the VM through the existing template-backed infrastructure path, runs readiness gating, opens an interactive SSH handoff, and launches the upstream OpenClaw installer.
 
 ## Primary Workflow
 
-- Entry point: `scripts/openclaw-gcp/install.sh`
+- Browser-first entrypoint: official `Open in Cloud Shell` URL + `scripts/openclaw-gcp/cloudshell-welcome.sh`
+- Direct operator entrypoint: `scripts/openclaw-gcp/install.sh`
 - Secure defaults: internal-only VM networking, Cloud NAT for egress, IAP for SSH
 - Readiness contract: startup sentinel and package-manager-idle gating before installer handoff
 - Handoff behavior: PTY-preserving transcript capture and success continuity via `exec bash -il`
