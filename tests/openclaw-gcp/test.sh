@@ -701,7 +701,16 @@ test_snapshot_policy_reuse_and_region_default_zone() {
 }
 
 test_docs_smoke_commands() {
+  local readme_content quickstart_content
   TESTS_RUN=$((TESTS_RUN + 1))
+
+  readme_content="$(cat "${ROOT_DIR}/README.md")"
+  quickstart_content="$(cat "${ROOT_DIR}/docs/openclaw-gcp/cloud-shell-quickstart.md")"
+  assert_contains "${readme_content}" "cloudshell_git_branch=main" "README Cloud Shell button pins the production main branch explicitly"
+  assert_contains "${readme_content}" "cloudshell_workspace=." "README Cloud Shell button opens the cloned repo root explicitly"
+  assert_contains "${quickstart_content}" "cloudshell_git_branch=main" "Cloud Shell quickstart documents the production branch pin"
+  assert_contains "${quickstart_content}" "cloudshell_workspace=." "Cloud Shell quickstart documents the repo-root workspace path"
+  assert_contains "${quickstart_content}" "--open_workspace \".\"" "Cloud Shell quickstart documents the repo-root workspace flag for cloudshell_open UAT"
 
   run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/create-template.sh" \
     --project-id hoangnb-openclaw \

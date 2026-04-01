@@ -8,13 +8,14 @@ It uses only documented Open in Cloud Shell parameters and does not rely on laun
 Use the official launch URL below or click the button in the root README:
 
 ```text
-https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/hoangnb24/gcp-openclaw&cloudshell_workspace=.&cloudshell_tutorial=docs/openclaw-gcp/cloud-shell-quickstart.md&show=ide,terminal
+https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/hoangnb24/gcp-openclaw&cloudshell_git_branch=main&cloudshell_workspace=.&cloudshell_tutorial=docs/openclaw-gcp/cloud-shell-quickstart.md&show=ide,terminal
 ```
 
 Documented parameters used:
 
 - `cloudshell_git_repo`: clones this repository into Cloud Shell
-- `cloudshell_workspace=.`: opens the repo root as the workspace
+- `cloudshell_git_branch=main`: pins the production branch explicitly because the documented default branch is `master`, not this repo's `main`
+- `cloudshell_workspace=.`: opens the root of the cloned repository as the workspace and terminal cwd
 - `cloudshell_tutorial`: launches this repo-hosted tutorial
 - `show=ide,terminal`: keeps the editor and terminal visible together
 
@@ -22,6 +23,25 @@ What this does not do:
 
 - it does not auto-run arbitrary repo commands
 - it does not auto-provision infrastructure
+
+For pre-merge branch UAT, replace `cloudshell_git_branch=main` with the branch under test.
+For example, this branch's UAT URL is:
+
+```text
+https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/hoangnb24/gcp-openclaw&cloudshell_git_branch=feature/openclaw-gcp-one-line-installer&cloudshell_workspace=.&cloudshell_tutorial=docs/openclaw-gcp/cloud-shell-quickstart.md&show=ide,terminal
+```
+
+If you validate from an existing Cloud Shell terminal with `cloudshell_open`, use the equivalent command:
+
+```sh
+cloudshell_open \
+  --repo_url "https://github.com/hoangnb24/gcp-openclaw" \
+  --git_branch "feature/openclaw-gcp-one-line-installer" \
+  --page "editor" \
+  --tutorial "docs/openclaw-gcp/cloud-shell-quickstart.md" \
+  --open_workspace "." \
+  --force_new_clone
+```
 
 ## 2. Start The Non-Mutating Welcome Flow
 

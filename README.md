@@ -7,10 +7,16 @@ The main Phase 1 story is:
 
 ## Cloud Shell Quickstart
 
-[![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/hoangnb24/gcp-openclaw&cloudshell_workspace=.&cloudshell_tutorial=docs/openclaw-gcp/cloud-shell-quickstart.md&show=ide%2Cterminal)
+[![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/hoangnb24/gcp-openclaw&cloudshell_git_branch=main&cloudshell_workspace=.&cloudshell_tutorial=docs/openclaw-gcp/cloud-shell-quickstart.md&show=ide%2Cterminal)
 
 The official Cloud Shell launch above clones this repo, opens the repo workspace, and launches the repo-hosted quickstart tutorial.
 It does not auto-provision anything.
+
+For pre-merge UAT on a feature branch, use the same URL but replace `cloudshell_git_branch=main` with the branch you are validating.
+For this branch, that means `cloudshell_git_branch=feature/openclaw-gcp-one-line-installer`.
+
+If you are testing with the `cloudshell_open` helper inside Cloud Shell instead of the browser URL, keep the workspace at repo root:
+`--open_workspace "."`
 
 In Cloud Shell, the happy path is:
 
