@@ -716,6 +716,7 @@ run_status() {
   local instance_status template_status router_status nat_status
   local instance_note template_note context_note=""
   local verified_lifecycle=""
+  local recovery_state_repaired="false"
 
   parse_common_args "$@"
   resolved_project="$(resolve_project_context)"
@@ -780,9 +781,24 @@ run_status() {
 
   [[ -z "${verified_lifecycle}" ]] || LIFECYCLE="${verified_lifecycle}"
 
+  if [[ "${SELECTION_SOURCE}" == "recovered-single-candidate" ]]; then
+    oc_stack_state_write_current "${STACK_ID}" "${resolved_project}" "${resolved_region}" "${resolved_zone}" "${LIFECYCLE}"
+    recovery_state_repaired="true"
+    state_stack_id="${STACK_ID}"
+    state_project_id="${resolved_project}"
+    state_region="${resolved_region}"
+    state_zone="${resolved_zone}"
+    state_lifecycle="${LIFECYCLE}"
+    if [[ -n "${RECOVERY_NOTE}" ]]; then
+      RECOVERY_NOTE="${RECOVERY_NOTE} Repaired local current-stack state in $(oc_stack_state_file)."
+    else
+      RECOVERY_NOTE="Repaired local current-stack state in $(oc_stack_state_file)."
+    fi
+  fi
+
   if [[ "${STATUS_JSON}" == "true" ]]; then
     cat <<EOF
-{"stack_id":"${STACK_ID}","selection_source":"${SELECTION_SOURCE}","lifecycle":"${LIFECYCLE}","project_id":"${resolved_project}","region":"${resolved_region}","zone":"${resolved_zone}","instance":{"name":"${instance_name}","status":"${instance_status}","note":"${instance_note:-}"},"template":{"name":"${template_name}","status":"${template_status}","note":"${template_note:-}"},"router":{"name":"${router_name}","status":"${router_status}"},"nat":{"name":"${nat_name}","status":"${nat_status}"},"state_file":"$(oc_stack_state_file)","current_stack_id":"${state_stack_id}"}
+{"stack_id":"${STACK_ID}","selection_source":"${SELECTION_SOURCE}","lifecycle":"${LIFECYCLE}","project_id":"${resolved_project}","region":"${resolved_region}","zone":"${resolved_zone}","instance":{"name":"${instance_name}","status":"${instance_status}","note":"${instance_note:-}"},"template":{"name":"${template_name}","status":"${template_status}","note":"${template_note:-}"},"router":{"name":"${router_name}","status":"${router_status}"},"nat":{"name":"${nat_name}","status":"${nat_status}"},"state_file":"$(oc_stack_state_file)","current_stack_id":"${state_stack_id}","state_repaired":"${recovery_state_repaired}"}
 EOF
     return 0
   fi
@@ -827,6 +843,7 @@ EOF
     echo "  note: ${RECOVERY_NOTE:-<none>}"
     echo "  recovered_candidates: $(stack_ids_to_space_list "${RECOVERY_CANDIDATES_NL}")"
     echo "  partial_anchor_ids: $(stack_ids_to_space_list "${RECOVERY_PARTIALS_NL}")"
+    echo "  state_repaired: ${recovery_state_repaired}"
   fi
 
   if [[ -n "${context_note}" ]]; then
