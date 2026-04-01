@@ -88,16 +88,17 @@ oc_stack_state_ensure_dir() {
 }
 
 oc_stack_state_write_current() {
-  local stack_id project_id region zone lifecycle state_file
+  local stack_id project_id region zone lifecycle state_file temp_file
   stack_id="$(oc_stack_require_id "${1:-}")"
   project_id="${2:-}"
   region="${3:-}"
   zone="${4:-}"
   lifecycle="${5:-${OPENCLAW_STACK_DEFAULT_LIFECYCLE}}"
   state_file="$(oc_stack_state_file)"
+  temp_file="${state_file}.tmp"
 
   oc_stack_state_ensure_dir
-  cat >"${state_file}" <<EOF
+  cat >"${temp_file}" <<EOF
 # openclaw-gcp local convenience state
 CURRENT_STACK_ID=${stack_id}
 LAST_PROJECT_ID=${project_id}
@@ -105,6 +106,7 @@ LAST_REGION=${region}
 LAST_ZONE=${zone}
 LIFECYCLE=${lifecycle}
 EOF
+  mv "${temp_file}" "${state_file}"
 }
 
 oc_stack_state_exists() {
@@ -128,6 +130,35 @@ oc_stack_state_get_or_empty() {
     return 0
   fi
   printf '\n'
+}
+
+oc_stack_state_clear_current_if_matches() {
+  local stack_id state_file current_stack_id temp_file
+  stack_id="$(oc_stack_require_id "${1:-}")"
+  state_file="$(oc_stack_state_file)"
+  [[ -f "${state_file}" ]] || return 0
+
+  current_stack_id="$(oc_stack_state_get_or_empty CURRENT_STACK_ID)"
+  [[ "${current_stack_id}" == "${stack_id}" ]] || return 0
+
+  temp_file="${state_file}.tmp"
+  cat >"${temp_file}" <<EOF
+# openclaw-gcp local convenience state
+CURRENT_STACK_ID=
+LAST_PROJECT_ID=$(oc_stack_state_get_or_empty LAST_PROJECT_ID)
+LAST_REGION=$(oc_stack_state_get_or_empty LAST_REGION)
+LAST_ZONE=$(oc_stack_state_get_or_empty LAST_ZONE)
+LIFECYCLE=
+EOF
+  mv "${temp_file}" "${state_file}"
+}
+
+oc_stack_is_cloud_shell() {
+  [[ "${CLOUD_SHELL:-}" == "true" ]]
+}
+
+oc_stack_is_interactive_session() {
+  [[ -t 0 && -t 1 ]]
 }
 
 oc_stack_print_contract() {

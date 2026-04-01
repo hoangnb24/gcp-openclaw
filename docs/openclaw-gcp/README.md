@@ -1,27 +1,145 @@
 # OpenClaw On GCP Runbook
 
-This runbook documents the primary installer-first workflow for this repository.
+This runbook documents the Phase 1 browser-first operator workflow and the thin wrapper that now sits in front of the existing GCP scripts.
 
-## Quickstart
+## Primary Quickstart
+
+Start from the root [README](../../README.md) and use the official Open in Cloud Shell button.
+Inside Cloud Shell, the primary flow is:
 
 ```bash
-bash scripts/openclaw-gcp/install.sh
+./bin/openclaw-gcp welcome
+./bin/openclaw-gcp up --stack-id my-stack
+./bin/openclaw-gcp status
+./bin/openclaw-gcp down
 ```
 
-The command is interactive by default in a TTY and performs:
+`welcome` is non-mutating.
+`up` is the real bring-up action.
+`status` explains both the remembered local stack context and the GCP-backed ownership anchors.
+`down` tears down the same stack contract without making you retype router/template/NAT names manually.
 
-1. local prerequisite validation (`gcloud`, auth, project, required APIs, zone/region, IAP SSH firewall candidate)
-2. instance create-or-reuse through the template-backed infrastructure path
-3. startup-contract readiness gating
-4. interactive IAP SSH handoff that launches `curl -fsSL https://openclaw.ai/install.sh | bash`
+## Cloud Shell Persistence And State
 
-Success behavior:
-- the upstream installer runs in a PTY-preserving SSH session
-- when install succeeds, the session continues in the VM shell via `exec bash -il`
+Phase 1 stores a small convenience file at:
 
-Failure behavior:
-- the wrapper exits locally with a clear summary
-- output includes an exact log retrieval hint for the remote installer log
+```bash
+~/.config/openclaw-gcp/current-stack.env
+```
+
+It contains:
+
+- `CURRENT_STACK_ID`
+- `LAST_PROJECT_ID`
+- `LAST_REGION`
+- `LAST_ZONE`
+- `LIFECYCLE`
+
+In normal Cloud Shell usage, `$HOME` persists across sessions, so this file usually remains there when you come back later.
+But that file is only convenience state.
+The durable ownership truth is the label set on the stack's instance/template anchors:
+
+- `openclaw_managed=true`
+- `openclaw_stack_id=<stack-id>`
+- `openclaw_tool=openclaw-gcp`
+- `openclaw_lifecycle=persistent`
+
+If local state disappears, becomes stale, or you use ephemeral Cloud Shell, the wrapper still verifies the GCP anchors before it will destroy anything.
+
+## Stack Command Surface
+
+## `welcome`
+
+```bash
+./bin/openclaw-gcp welcome
+```
+
+Purpose:
+- guide the first Cloud Shell interaction
+- ask for a stack ID in interactive mode
+- point directly at the exact `up` command
+
+Behavior:
+- never provisions infrastructure by itself
+- can immediately chain into `up` if the operator confirms
+
+## `up`
+
+```bash
+./bin/openclaw-gcp up --stack-id my-stack
+```
+
+Behavior:
+- requires an explicit stack ID on the first real run
+- derives the managed resource names automatically
+- writes the current-stack convenience state before delegating so partial bring-up is still recoverable by `status` and `down`
+- delegates real work to [`scripts/openclaw-gcp/install.sh`](../../scripts/openclaw-gcp/install.sh)
+
+Inherited safety/behavior from the existing install engine:
+- local prerequisite validation
+- project/API/zone/firewall checks
+- create-or-reuse behavior
+- readiness gating
+- repair of eligible legacy startup contracts
+- interactive IAP SSH handoff to `curl -fsSL https://openclaw.ai/install.sh | bash`
+
+## `status`
+
+```bash
+./bin/openclaw-gcp status
+```
+
+Behavior:
+- uses the current stack from local state unless `--stack-id` is passed
+- prints project/region/zone context
+- prints the expected instance/template/router/NAT names for the stack
+- checks whether the instance/template anchors exist and whether their labels match the requested stack
+- checks whether the deterministic router/NAT companions exist
+
+Machine-readable mode is also available:
+
+```bash
+./bin/openclaw-gcp status --json
+```
+
+## `down`
+
+```bash
+./bin/openclaw-gcp down
+```
+
+Behavior:
+- in interactive Cloud Shell only, defaults to the remembered current stack
+- outside interactive Cloud Shell, requires `--stack-id`
+- requires a resolvable project context
+- verifies the instance/template anchors in GCP before delegating to destroy
+- delegates real teardown to [`scripts/openclaw-gcp/destroy.sh`](../../scripts/openclaw-gcp/destroy.sh)
+- clears the remembered current-stack pointer after a successful real teardown of that stack
+
+Dry-run example:
+
+```bash
+./bin/openclaw-gcp down --stack-id my-stack --dry-run
+```
+
+Non-interactive example:
+
+```bash
+./bin/openclaw-gcp down --stack-id my-stack --yes --non-interactive
+```
+
+## What `down` Still Preserves
+
+The new wrapper does not weaken the old destroy contract.
+The underlying destroy engine still provides:
+
+- exact-name qualification
+- deterministic delete ordering
+- typed confirmation for real interactive teardown
+- explicit project targeting protection
+- dry-run transparency
+
+The wrapper simply resolves those exact names from the stack ID and refuses to proceed if the labeled anchors do not match.
 
 ## Default Operating Profile
 
@@ -30,93 +148,42 @@ Failure behavior:
 - Machine type: `e2-standard-2`
 - Disk: `pd-balanced`, `30 GiB`
 - Networking posture: internal-only VM, Cloud NAT egress, IAP SSH ingress
+- Lifecycle label default: `persistent`
 
-## Key Commands
+## Direct Engines
 
-- `bash scripts/openclaw-gcp/install.sh --help`
-- `bash scripts/openclaw-gcp/install.sh --dry-run`
+The lower-level scripts remain available:
 
-Common explicit inputs:
-- `--project-id`
-- `--instance-name`
-- `--zone`
-- `--region`
-- `--openclaw-tag` (required in non-interactive runs when creating template-backed resources)
+- `bash scripts/openclaw-gcp/install.sh`
+- `bash scripts/openclaw-gcp/destroy.sh`
+- `bash scripts/openclaw-gcp/create-instance.sh`
+- `bash scripts/openclaw-gcp/create-template.sh`
 
-Non-interactive automation:
-- pass `--non-interactive` and supply all required flags explicitly
-- preflight errors fail before provisioning and include concrete recovery commands
-
-## Destroy Workflow
-
-Use the destroy companion to tear down OpenClaw resources by exact names only.
-It does not discover or sweep unrelated/shared infrastructure.
-
-Start with a dry run:
-
-```bash
-bash scripts/openclaw-gcp/destroy.sh \
-  --project-id <gcp-project-id> \
-  --instance-name oc-main \
-  --template-name oc-template \
-  --router-name oc-router \
-  --nat-name oc-nat \
-  --dry-run
-```
-
-Interactive safety behavior:
-- real interactive runs require typing the confirmation token before deletions start
-- automation can bypass the prompt with `--yes` (recommended only for controlled CI/ops workflows)
-
-Automation example:
-
-```bash
-bash scripts/openclaw-gcp/destroy.sh \
-  --project-id <gcp-project-id> \
-  --instance-name oc-main \
-  --template-name oc-template \
-  --router-name oc-router \
-  --nat-name oc-nat \
-  --yes \
-  --non-interactive
-```
-
-Optional explicit extra targets (deleted only when named):
-- `--snapshot-policy-name <policy>`
-- `--snapshot-policy-disk <disk>` with `--snapshot-policy-disk-zone <zone>` when detach context is needed
-- `--clone-instance-name <name>` with `--clone-zone <zone>`
-- `--machine-image-name <name>`
-
-If any target delete fails, the script continues with remaining explicit targets, exits non-zero, and prints a final summary of succeeded vs failed actions.
-Treat that summary as the manual cleanup checklist before considering teardown complete.
+Use those when you intentionally want the lower-level contract.
+For normal Phase 1 operations, prefer `./bin/openclaw-gcp`.
 
 ## Troubleshooting
 
-Local preflight failures:
-- read the emitted `Preflight failed:` message
-- run the exact `Recovery:` command shown by the script
+If `up` fails before or during bring-up:
+- rerun `./bin/openclaw-gcp status`
+- inspect the remembered project/region/zone in `~/.config/openclaw-gcp/current-stack.env`
+- use the existing install-script recovery messages and remote log hints
 
-Readiness gate failures:
-- script prints readiness failure reason
-- script prints remote readiness log contract and retrieval hint
+If `down` refuses to proceed:
+- check that the project context is correct
+- run `./bin/openclaw-gcp status --stack-id <stack-id>`
+- confirm the instance/template anchors still exist and still carry the expected OpenClaw labels
 
-Installer handoff failures:
-- script prints local failure summary and exact remote installer log retrieval command
-- resolve issue remotely, then rerun `install.sh`
+If Cloud Shell opens next month and the convenience file is still present:
+- `./bin/openclaw-gcp status`
+- `./bin/openclaw-gcp down`
+
+If the convenience file is gone or stale:
+- Phase 1 fails closed instead of guessing
+- later recovery work can build on the durable GCP labels safely
 
 ## Day-2 Docs
 
+- [Cloud Shell quickstart](cloud-shell-quickstart.md)
 - [Backup and restore](backup-and-restore.md)
 - [Sizing and cost baselines](sizing-and-cost.md)
-
-## Compatibility
-
-Legacy infrastructure-oriented script entrypoints remain available for migration and advanced workflows:
-
-- `bash scripts/openclaw-gcp/create-template.sh ...`
-- `bash scripts/openclaw-gcp/create-instance.sh ...`
-- `bash scripts/openclaw-gcp/bootstrap-openclaw.sh ...`
-
-## Deprecated
-
-The old Docker/bootstrap-first primary workflow is deprecated. Use `bash scripts/openclaw-gcp/install.sh` as the canonical entrypoint.

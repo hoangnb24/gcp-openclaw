@@ -1,77 +1,118 @@
 # OpenClaw on GCP
 
-This repository now centers on a Cloud-Shell-first operator flow for provisioning or reusing an OpenClaw VM on GCP, validating prerequisites, and handing off to the upstream interactive installer over IAP SSH.
+This repo now treats Cloud Shell as the primary operator terminal for OpenClaw on GCP.
+The main Phase 1 story is:
+
+`Open in Cloud Shell -> welcome -> up -> status -> down`
 
 ## Cloud Shell Quickstart
 
-[![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://console.cloud.google.com/cloudshell/open?cloudshell_git_repo=https://github.com/hoangnb24/gcp-openclaw&cloudshell_workspace=gcp-openclaw&cloudshell_tutorial=docs/openclaw-gcp/cloud-shell-quickstart.md)
+[![Open in Cloud Shell](https://gstatic.com/cloudssh/images/open-btn.svg)](https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/hoangnb24/gcp-openclaw&cloudshell_workspace=.&cloudshell_tutorial=docs/openclaw-gcp/cloud-shell-quickstart.md&show=ide%2Cterminal)
 
-Use the button above to open this repo in Google Cloud Shell with a repo-hosted tutorial.
-The tutorial and welcome flow are non-mutating and guide you toward the Phase 1 stack-native path:
+The official Cloud Shell launch above clones this repo, opens the repo workspace, and launches the repo-hosted quickstart tutorial.
+It does not auto-provision anything.
 
-```bash
-bash scripts/openclaw-gcp/cloudshell-welcome.sh
-```
-
-For full browser-first flow details, see [Cloud Shell quickstart](docs/openclaw-gcp/cloud-shell-quickstart.md).
-
-## Direct Installer Entry
-
-The existing installer entrypoint remains available directly:
+In Cloud Shell, the happy path is:
 
 ```bash
-bash scripts/openclaw-gcp/install.sh
+./bin/openclaw-gcp welcome
+./bin/openclaw-gcp up --stack-id my-stack
+./bin/openclaw-gcp status
+./bin/openclaw-gcp down
 ```
 
-The installer performs local preflight checks, provisions or reuses the VM through the existing template-backed infrastructure path, runs readiness gating, opens an interactive SSH handoff, and launches the upstream OpenClaw installer.
+`welcome` is non-mutating.
+`up` uses your stack ID to derive the VM, template, router, and NAT names automatically and then delegates to the existing install engine underneath.
+`down` delegates to the existing destroy engine, but only after verifying that the stack's labeled GCP anchors match the stack you asked for.
 
-## Primary Workflow
+For the full browser-first walkthrough, see [Cloud Shell quickstart](docs/openclaw-gcp/cloud-shell-quickstart.md).
 
-- Browser-first entrypoint: official `Open in Cloud Shell` URL + `scripts/openclaw-gcp/cloudshell-welcome.sh`
-- Direct operator entrypoint: `scripts/openclaw-gcp/install.sh`
-- Secure defaults: internal-only VM networking, Cloud NAT for egress, IAP for SSH
-- Readiness contract: startup sentinel and package-manager-idle gating before installer handoff
-- Handoff behavior: PTY-preserving transcript capture and success continuity via `exec bash -il`
+## Stack Model
 
-## Destroy Companion
+Phase 1 makes the stack the unit of ownership.
+You name the stack once, and the wrapper derives the raw GCP resource names for you:
 
-Use the repo-native destroy companion to plan or run teardown for the exact resources you name.
-The script does not do broad discovery, and `--dry-run` is the safe first step before any real deletion.
+- VM instance: `oc-<stack-id>`
+- Instance template: `oc-<stack-id>-template`
+- Cloud Router: `oc-<stack-id>-router`
+- Cloud NAT: `oc-<stack-id>-nat`
+
+The wrapper applies these labels on labelable resources in the bring-up path:
+
+- `openclaw_managed=true`
+- `openclaw_stack_id=<stack-id>`
+- `openclaw_tool=openclaw-gcp`
+- `openclaw_lifecycle=persistent`
+
+Those labels on the instance/template anchors are the durable ownership truth in Phase 1.
+Router and NAT stay deterministic companion resources derived from the stack ID because the current CLI path here does not expose label flags there.
+
+## What Persists In Cloud Shell
+
+This repo stores a small convenience pointer at `~/.config/openclaw-gcp/current-stack.env`.
+That file remembers the current stack plus the last-known project, region, and zone so the next `status` or `down` command can stay simple.
+
+In normal Cloud Shell usage, `$HOME` is persistent, so that file usually survives when you come back later.
+But Cloud Shell itself is still a temporary VM, `gcloud` tab preferences do not persist by default, and ephemeral Cloud Shell sessions can discard local state entirely.
+
+That is why Phase 1 treats local state as convenience only and still verifies the labeled GCP anchors before teardown.
+If local state is gone or stale, later recovery work can build on those labels safely.
+
+## Primary Commands
 
 ```bash
-bash scripts/openclaw-gcp/destroy.sh \
-  --project-id <gcp-project-id> \
-  --instance-name oc-main \
-  --template-name oc-template \
-  --router-name oc-router \
-  --nat-name oc-nat \
-  --dry-run
+./bin/openclaw-gcp welcome
 ```
 
-For full teardown guidance, optional extras (snapshot policy, clone instance, machine image), and confirmation behavior, use the [OpenClaw GCP operator runbook](docs/openclaw-gcp/README.md).
+Non-mutating Cloud Shell guidance.
+In interactive mode it asks for a stack ID and offers to jump straight into `up`.
 
-## Day-2 Operations
+```bash
+./bin/openclaw-gcp up --stack-id my-stack
+```
 
-- [Operator runbook](docs/openclaw-gcp/README.md)
+Primary bring-up path.
+On first use, you must name the stack explicitly.
+After that, the wrapper remembers the current stack in local Cloud Shell state.
+
+```bash
+./bin/openclaw-gcp status
+```
+
+Shows the current or explicit stack, the local convenience state, and whether the stack's GCP anchors exist with matching OpenClaw labels.
+
+```bash
+./bin/openclaw-gcp down
+```
+
+Interactive Cloud Shell convenience path for the remembered current stack.
+Outside interactive Cloud Shell sessions, use `--stack-id` explicitly.
+
+## Safety Properties Kept Intact
+
+- `up` still uses the existing preflight checks, create-or-reuse logic, readiness gating, repair path, and upstream installer handoff from [`scripts/openclaw-gcp/install.sh`](scripts/openclaw-gcp/install.sh).
+- `down` still uses the existing exact-name qualification checks, deterministic delete ordering, typed confirmation, and dry-run behavior from [`scripts/openclaw-gcp/destroy.sh`](scripts/openclaw-gcp/destroy.sh).
+- Teardown now adds one extra safety layer before delegation: the wrapper refuses to tear down if the labeled instance/template anchors do not match the requested stack.
+
+## Direct Engines Still Available
+
+The thin product layer is intentionally layered over the existing scripts, not a rewrite.
+These lower-level entrypoints still exist for advanced or migration workflows:
+
+- [`scripts/openclaw-gcp/install.sh`](scripts/openclaw-gcp/install.sh)
+- [`scripts/openclaw-gcp/destroy.sh`](scripts/openclaw-gcp/destroy.sh)
+- [`scripts/openclaw-gcp/create-instance.sh`](scripts/openclaw-gcp/create-instance.sh)
+- [`scripts/openclaw-gcp/create-template.sh`](scripts/openclaw-gcp/create-template.sh)
+
+## Operator Docs
+
+- [OpenClaw GCP runbook](docs/openclaw-gcp/README.md)
+- [Cloud Shell quickstart](docs/openclaw-gcp/cloud-shell-quickstart.md)
 - [Backup and restore](docs/openclaw-gcp/backup-and-restore.md)
 - [Sizing and cost baselines](docs/openclaw-gcp/sizing-and-cost.md)
 
 ## Verification
 
-Run the repository test suite:
-
 ```bash
 make test
 ```
-
-## Compatibility
-
-Legacy infrastructure-oriented scripts are still available for advanced or migration use, but they are no longer the primary quickstart path:
-
-- `scripts/openclaw-gcp/create-template.sh`
-- `scripts/openclaw-gcp/create-instance.sh`
-- `scripts/openclaw-gcp/bootstrap-openclaw.sh`
-
-## Deprecated
-
-The former Docker/bootstrap-first operator story is deprecated in favor of the installer-first flow above.

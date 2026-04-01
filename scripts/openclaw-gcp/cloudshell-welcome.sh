@@ -84,9 +84,12 @@ This welcome flow is non-mutating. It only prepares your next step.
 Selected stack ID: ${STACK_ID}
 
 Next command:
-  bin/openclaw-gcp up --stack-id ${STACK_ID}
+  ./bin/openclaw-gcp up --stack-id ${STACK_ID}
 
 This stack ID becomes your explicit operator identity for the Phase 1 flow.
+After a real up run, the current stack pointer is stored at:
+  $HOME/.config/openclaw-gcp/current-stack.env
+That file is convenience state for Cloud Shell. The durable ownership truth remains the GCP labels on the stack's instance/template anchors.
 EOF
 
 if [[ -x "${WRAPPER_PATH}" ]]; then
