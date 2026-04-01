@@ -268,6 +268,30 @@ if [[ "$*" == *"compute instances list"* && "$*" == *"--format=value(zone.basena
   exit 0
 fi
 
+if [[ "$*" == *"compute instances list"* && "$*" == *"--format=value(labels.openclaw_stack_id)"* ]]; then
+  if [[ -n "${MOCK_RECOVERY_INSTANCE_STACK_IDS:-}" ]]; then
+    printf '%b\n' "${MOCK_RECOVERY_INSTANCE_STACK_IDS}"
+    exit 0
+  fi
+  if [[ "${MOCK_INSTANCE_EXISTS:-false}" == "true" ]]; then
+    printf '%s\n' "$(derive_stack_id_from_resource_name "${MOCK_INSTANCE_NAME:-oc-main}")"
+    exit 0
+  fi
+  exit 0
+fi
+
+if [[ "$*" == *"compute instance-templates list"* && "$*" == *"--format=value(labels.openclaw_stack_id)"* ]]; then
+  if [[ -n "${MOCK_RECOVERY_TEMPLATE_STACK_IDS:-}" ]]; then
+    printf '%b\n' "${MOCK_RECOVERY_TEMPLATE_STACK_IDS}"
+    exit 0
+  fi
+  if [[ "${MOCK_TEMPLATE_EXISTS:-false}" == "true" ]]; then
+    printf '%s\n' "$(derive_stack_id_from_resource_name "${MOCK_TEMPLATE_NAME:-oc-template}")"
+    exit 0
+  fi
+  exit 0
+fi
+
 if [[ "$*" == *"compute images describe"* && "$*" == *"--format=value(name)"* ]]; then
   for arg in "$@"; do
     if [[ "${arg}" != --* && "${arg}" != "compute" && "${arg}" != "images" && "${arg}" != "describe" ]]; then
@@ -801,6 +825,8 @@ test_docs_smoke_commands() {
   run_capture bash "${ROOT_DIR}/bin/openclaw-gcp" welcome --stack-id team-dev --non-interactive
   assert_status 0 "Cloud Shell welcome entrypoint parses in non-interactive mode"
   assert_contains "${RUN_OUTPUT}" "./bin/openclaw-gcp up --stack-id team-dev" "welcome entrypoint points to the stack-native up command"
+  assert_contains "${RUN_OUTPUT}" "This flow expects an existing accessible GCP project." "welcome entrypoint explains the project-scope boundary"
+  assert_contains "${RUN_OUTPUT}" "gcloud config set project <PROJECT_ID>" "welcome entrypoint shows how to select an existing project"
 }
 
 test_stack_wrapper_up_status_down_contract() {
@@ -966,6 +992,91 @@ EOF
 
   state_content="$(cat "${state_file}")"
   assert_contains "${state_content}" "CURRENT_STACK_ID=" "wrapper down clears the current stack pointer after success"
+}
+
+test_stack_wrapper_recovery_contract() {
+  local mock_dir home_dir state_file state_content
+  mock_dir="$(new_mock_env stack-wrapper-recovery)"
+  home_dir="${mock_dir}/home"
+  mkdir -p "${home_dir}"
+  TESTS_RUN=$((TESTS_RUN + 1))
+  state_file="${home_dir}/.config/openclaw-gcp/current-stack.env"
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    MOCK_RECOVERY_INSTANCE_STACK_IDS="team-dev" \
+    MOCK_RECOVERY_TEMPLATE_STACK_IDS="team-dev" \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" status \
+    --project-id hoangnb-openclaw
+
+  assert_status 0 "wrapper status recovers one stack when current-state is missing"
+  assert_contains "${RUN_OUTPUT}" "selection_source: recovered-single-candidate" "wrapper status reports recovered-single-candidate selection source"
+  assert_contains "${RUN_OUTPUT}" "state_repaired: true" "wrapper status reports that local state was repaired"
+  if [[ -f "${state_file}" ]]; then
+    pass "wrapper status writes local state after exact-one recovery"
+  else
+    fail "wrapper status should write local state after exact-one recovery"
+  fi
+  state_content="$(cat "${state_file}")"
+  assert_contains "${state_content}" "CURRENT_STACK_ID=team-dev" "recovered state stores the recovered stack ID"
+
+  cat >"${state_file}" <<'EOF'
+# openclaw-gcp local convenience state
+CURRENT_STACK_ID=old-stack
+LAST_PROJECT_ID=hoangnb-openclaw
+LAST_REGION=asia-southeast1
+LAST_ZONE=asia-southeast1-a
+LIFECYCLE=persistent
+EOF
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    MOCK_RECOVERY_INSTANCE_STACK_IDS="team-dev" \
+    MOCK_RECOVERY_TEMPLATE_STACK_IDS="team-dev" \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" status \
+    --project-id hoangnb-openclaw
+
+  assert_status 0 "wrapper status treats stale current-state as recoverable convenience data"
+  assert_contains "${RUN_OUTPUT}" "current state 'old-stack' appears stale; status recovered 'team-dev' from labels." "wrapper status explains stale-state recovery"
+  state_content="$(cat "${state_file}")"
+  assert_contains "${state_content}" "CURRENT_STACK_ID=team-dev" "stale state is repaired to the recovered stack ID"
+
+  rm -f "${state_file}"
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_RECOVERY_INSTANCE_STACK_IDS=$'team-dev\nteam-prod' \
+    MOCK_RECOVERY_TEMPLATE_STACK_IDS=$'team-dev\nteam-prod' \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" status \
+    --project-id hoangnb-openclaw
+
+  assert_status 1 "wrapper status fails closed when multiple recovery candidates exist"
+  assert_contains "${RUN_OUTPUT}" "status recovery is ambiguous" "wrapper status reports ambiguous recovery candidates"
+  assert_contains "${RUN_OUTPUT}" "Pass --stack-id explicitly." "wrapper status requires explicit stack selection on ambiguity"
+  if [[ -f "${state_file}" ]]; then
+    fail "ambiguous recovery should not write local state"
+    cat "${state_file}"
+  else
+    pass "ambiguous recovery leaves local state untouched"
+  fi
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    CLOUD_SHELL=true \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" down \
+    --project-id hoangnb-openclaw \
+    --dry-run
+
+  assert_status 1 "wrapper down still refuses to guess after ambiguous recovery"
+  assert_contains "${RUN_OUTPUT}" "down requires --stack-id outside interactive Cloud Shell sessions" "wrapper down keeps explicit stack requirement when no repaired current state exists"
+
+  run_capture bash -c "env PATH=\"/usr/bin:/bin\" HOME=\"${home_dir}\" bash \"${ROOT_DIR}/bin/openclaw-gcp\" status --project-id hoangnb-openclaw"
+  assert_status 1 "wrapper status reports insufficient context when gcloud is unavailable"
+  assert_contains "${RUN_OUTPUT}" "status has insufficient context" "wrapper status emits the insufficient-context guidance"
 }
 
 test_install_help_and_noninteractive_gcloud_guard() {
@@ -1601,6 +1712,7 @@ main() {
   test_stack_wrapper_up_status_down_contract
   test_stack_wrapper_state_persists_when_up_fails
   test_stack_wrapper_down_safety_guards
+  test_stack_wrapper_recovery_contract
   test_install_help_and_noninteractive_gcloud_guard
   test_install_parser_missing_value_guard
   test_install_prompt_and_nonprompt_behavior
