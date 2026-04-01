@@ -240,13 +240,108 @@ EOF
 run_status() {
   parse_common_args "$@"
   STACK_ID="$(resolve_stack_id "${STACK_ID}")"
+  local state_lifecycle
+  local status_project_id status_region status_zone
+  local instance_name template_name router_name nat_name
+  local labels_csv
+  local instance_status template_status router_status nat_status
+  local context_note=""
+
+  if [[ "${LIFECYCLE}" == "${OPENCLAW_STACK_DEFAULT_LIFECYCLE}" ]]; then
+    state_lifecycle="$(oc_stack_state_get_or_empty LIFECYCLE)"
+    [[ -n "${state_lifecycle}" ]] && LIFECYCLE="${state_lifecycle}"
+  fi
+
+  status_project_id="${PROJECT_ID}"
+  [[ -z "${status_project_id}" ]] && status_project_id="$(oc_stack_state_get_or_empty LAST_PROJECT_ID)"
+  if [[ -z "${status_project_id}" ]] && command -v gcloud >/dev/null 2>&1; then
+    status_project_id="$(gcloud config get-value project 2>/dev/null || true)"
+    [[ "${status_project_id}" == "(unset)" ]] && status_project_id=""
+  fi
+
+  status_region="${REGION}"
+  [[ -z "${status_region}" ]] && status_region="$(oc_stack_state_get_or_empty LAST_REGION)"
+  [[ -z "${status_region}" ]] && status_region="asia-southeast1"
+
+  status_zone="${ZONE}"
+  [[ -z "${status_zone}" ]] && status_zone="$(oc_stack_state_get_or_empty LAST_ZONE)"
+  [[ -z "${status_zone}" ]] && status_zone="${status_region}-a"
+
+  instance_name="$(oc_stack_instance_name "${STACK_ID}")"
+  template_name="$(oc_stack_template_name "${STACK_ID}")"
+  router_name="$(oc_stack_router_name "${STACK_ID}")"
+  nat_name="$(oc_stack_nat_name "${STACK_ID}")"
+  labels_csv="$(oc_stack_labels_csv "${STACK_ID}" "${LIFECYCLE}")"
+
+  if ! command -v gcloud >/dev/null 2>&1; then
+    instance_status="unknown (gcloud not available in PATH)"
+    template_status="unknown (gcloud not available in PATH)"
+    router_status="unknown (gcloud not available in PATH)"
+    nat_status="unknown (gcloud not available in PATH)"
+    context_note="Install gcloud or run inside Cloud Shell to get live resource existence checks."
+  elif [[ -z "${status_project_id}" ]]; then
+    instance_status="unknown (missing project context)"
+    template_status="unknown (missing project context)"
+    router_status="unknown (missing project context)"
+    nat_status="unknown (missing project context)"
+    context_note="Pass --project-id or run 'up' once to persist LAST_PROJECT_ID in $(oc_stack_state_file)."
+  else
+    if gcloud compute instances describe "${instance_name}" --project "${status_project_id}" --zone "${status_zone}" --format='value(name)' >/dev/null 2>&1; then
+      instance_status="present"
+    else
+      instance_status="missing"
+    fi
+
+    if gcloud compute instance-templates describe "${template_name}" --project "${status_project_id}" --region "${status_region}" --format='value(name)' >/dev/null 2>&1; then
+      template_status="present"
+    else
+      template_status="missing"
+    fi
+
+    if gcloud compute routers describe "${router_name}" --project "${status_project_id}" --region "${status_region}" --format='value(name)' >/dev/null 2>&1; then
+      router_status="present"
+    else
+      router_status="missing"
+    fi
+
+    if gcloud compute routers nats describe "${nat_name}" --project "${status_project_id}" --router "${router_name}" --region "${status_region}" --format='value(name)' >/dev/null 2>&1; then
+      nat_status="present"
+    else
+      nat_status="missing"
+    fi
+  fi
 
   cat <<EOF
-[status] Phase 1 stack contract snapshot.
-The human-readable GCP discovery summary lands in Story 3 follow-up work.
+OpenClaw GCP Stack Status
+=========================
+stack_id: ${STACK_ID}
+lifecycle: ${LIFECYCLE}
 
-$(oc_stack_print_contract "${STACK_ID}" "${LIFECYCLE}")
+Context
+  project_id: ${status_project_id:-<unknown>}
+  region: ${status_region}
+  zone: ${status_zone}
+
+Managed Resources (expected for this stack)
+  instance (${instance_name}): ${instance_status}
+  template (${template_name}): ${template_status}
+  router (${router_name}): ${router_status}
+  nat (${nat_name}): ${nat_status}
+
+Ownership Contract
+  label selector for labelable resources: ${labels_csv}
+  deterministic companion names for router/nat derive from stack_id
+
+Local Convenience State
+  state_file: $(oc_stack_state_file)
+  current_stack_id: $(oc_stack_state_get_or_empty CURRENT_STACK_ID)
+
 EOF
+
+  if [[ -n "${context_note}" ]]; then
+    echo
+    echo "Note: ${context_note}"
+  fi
 }
 
 run_down() {

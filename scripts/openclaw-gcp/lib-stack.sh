@@ -121,6 +121,15 @@ oc_stack_state_get() {
   printf '%s\n' "${value}"
 }
 
+oc_stack_state_get_or_empty() {
+  local key="${1:-}" value=""
+  if value="$(oc_stack_state_get "${key}" 2>/dev/null)"; then
+    printf '%s\n' "${value}"
+    return 0
+  fi
+  printf '\n'
+}
+
 oc_stack_print_contract() {
   local stack_id lifecycle
   stack_id="$(oc_stack_require_id "${1:-}")"
