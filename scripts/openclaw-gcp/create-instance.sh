@@ -22,6 +22,7 @@ IMAGE_NAME=""
 STARTUP_SCRIPT_FILE=""
 STARTUP_SCRIPT_URL=""
 STARTUP_SCRIPT_SHA256=""
+RESOURCE_LABELS=""
 SERVICE_ACCOUNT=""
 SCOPES=""
 NO_SERVICE_ACCOUNT="false"
@@ -68,6 +69,7 @@ Options:
   --startup-script-file <path>  Local startup script source for template
   --startup-script-url <url>    Remote startup script source for template
   --startup-script-sha256 <hex> Required SHA-256 when using --startup-script-url
+  --resource-labels <csv>       Labels to apply to template and instance resources
   --service-account <email>     Service account for template-created VMs
   --scopes <csv>                OAuth scopes for the template service account
   --no-service-account          Create template-created VMs without any attached service account
@@ -131,6 +133,7 @@ while [[ $# -gt 0 ]]; do
     --startup-script-file) STARTUP_SCRIPT_FILE="${2:-}"; record_explicit_template_input "--startup-script-file"; shift 2 ;;
     --startup-script-url) STARTUP_SCRIPT_URL="${2:-}"; record_explicit_template_input "--startup-script-url"; shift 2 ;;
     --startup-script-sha256) STARTUP_SCRIPT_SHA256="${2:-}"; record_explicit_template_input "--startup-script-sha256"; shift 2 ;;
+    --resource-labels) RESOURCE_LABELS="${2:-}"; shift 2 ;;
     --service-account) SERVICE_ACCOUNT="${2:-}"; record_explicit_template_input "--service-account"; shift 2 ;;
     --scopes) SCOPES="${2:-}"; record_explicit_template_input "--scopes"; shift 2 ;;
     --no-service-account) NO_SERVICE_ACCOUNT="true"; record_explicit_template_input "--no-service-account"; shift ;;
@@ -202,6 +205,9 @@ if [[ "${ENSURE_TEMPLATE}" == "true" ]]; then
   if [[ -n "${STARTUP_SCRIPT_SHA256}" ]]; then
     TEMPLATE_CMD+=(--startup-script-sha256 "${STARTUP_SCRIPT_SHA256}")
   fi
+  if [[ -n "${RESOURCE_LABELS}" ]]; then
+    TEMPLATE_CMD+=(--resource-labels "${RESOURCE_LABELS}")
+  fi
   if [[ -n "${SERVICE_ACCOUNT}" ]]; then
     TEMPLATE_CMD+=(--service-account "${SERVICE_ACCOUNT}")
   fi
@@ -263,6 +269,9 @@ CREATE_CMD=(
   --zone "${ZONE}"
   --source-instance-template "${SOURCE_TEMPLATE}"
 )
+if [[ -n "${RESOURCE_LABELS}" ]]; then
+  CREATE_CMD+=(--labels "${RESOURCE_LABELS}")
+fi
 
 echo "Instance defaults:"
 echo "  instance_name: ${INSTANCE_NAME}"
@@ -275,6 +284,7 @@ echo "  disk(default): ${DISK_TYPE} ${DISK_SIZE_GB} GiB"
 echo "  ensure_template: ${ENSURE_TEMPLATE}"
 echo "  replace_template: ${REPLACE_TEMPLATE}"
 echo "  ensure_cloud_nat: ${ENSURE_CLOUD_NAT}"
+echo "  resource_labels: ${RESOURCE_LABELS:-<none>}"
 if (( ${#EXPLICIT_TEMPLATE_INPUTS[@]} > 0 )); then
   echo "  explicit_template_inputs: ${EXPLICIT_TEMPLATE_INPUTS[*]}"
 fi

@@ -5,6 +5,7 @@ BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${BIN_DIR}/.." && pwd)"
 STACK_LIB="${REPO_ROOT}/scripts/openclaw-gcp/lib-stack.sh"
 WELCOME_SCRIPT="${REPO_ROOT}/scripts/openclaw-gcp/cloudshell-welcome.sh"
+INSTALL_SCRIPT="${REPO_ROOT}/scripts/openclaw-gcp/install.sh"
 
 [[ -f "${STACK_LIB}" ]] || {
   echo "Error: missing stack helper library at ${STACK_LIB}" >&2
@@ -21,7 +22,7 @@ Phase 1 command surface for OpenClaw on GCP.
 
 Commands:
   welcome   Run the non-mutating Cloud Shell welcome flow
-  up        Validate stack inputs and print stack contract for bring-up wiring
+  up        Run stack-native bring-up through the existing install engine
   status    Show the active stack contract from local convenience state
   down      Validate stack inputs and print stack contract for teardown wiring
   help      Show this help text
@@ -33,6 +34,17 @@ Common options:
   --region <region>    Last-known region context (used for state write with up)
   --zone <zone>        Last-known zone context (used for state write with up)
   -h, --help           Show command help
+
+`up` passthrough options:
+  --openclaw-tag <tag>      Forwarded to install.sh
+  --openclaw-image <image>  Forwarded to install.sh
+  --service-account <email> Forwarded to install.sh
+  --scopes <csv>            Forwarded to install.sh
+  --no-service-account      Forwarded to install.sh
+  --allow-external-ip       Forwarded to install.sh
+  --interactive             Forwarded to install.sh
+  --non-interactive         Forwarded to install.sh
+  --dry-run                 Forwarded to install.sh
 EOF
 }
 
@@ -93,6 +105,67 @@ parse_common_args() {
   done
 }
 
+parse_up_args() {
+  STACK_ID=""
+  LIFECYCLE="${OPENCLAW_STACK_DEFAULT_LIFECYCLE}"
+  PROJECT_ID=""
+  REGION=""
+  ZONE=""
+  UP_DRY_RUN="false"
+  INSTALL_PASSTHROUGH_ARGS=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack-id)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --stack-id"
+        STACK_ID="$2"
+        shift 2
+        ;;
+      --lifecycle)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --lifecycle"
+        LIFECYCLE="$2"
+        shift 2
+        ;;
+      --project-id)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --project-id"
+        PROJECT_ID="$2"
+        shift 2
+        ;;
+      --region)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --region"
+        REGION="$2"
+        shift 2
+        ;;
+      --zone)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --zone"
+        ZONE="$2"
+        shift 2
+        ;;
+      --openclaw-tag|--openclaw-image|--service-account|--scopes)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for $1"
+        INSTALL_PASSTHROUGH_ARGS+=("$1" "$2")
+        shift 2
+        ;;
+      --no-service-account|--allow-external-ip|--interactive|--non-interactive)
+        INSTALL_PASSTHROUGH_ARGS+=("$1")
+        shift
+        ;;
+      --dry-run)
+        UP_DRY_RUN="true"
+        INSTALL_PASSTHROUGH_ARGS+=("$1")
+        shift
+        ;;
+      -h|--help)
+        command_usage "${COMMAND}"
+        exit 0
+        ;;
+      *)
+        die "unknown option for ${COMMAND}: $1"
+        ;;
+    esac
+  done
+}
+
 resolve_stack_id() {
   local explicit="${1:-}" remembered=""
   if [[ -n "${explicit}" ]]; then
@@ -114,16 +187,54 @@ run_welcome() {
 }
 
 run_up() {
-  parse_common_args "$@"
+  parse_up_args "$@"
   STACK_ID="$(resolve_stack_id "${STACK_ID}")"
-  oc_stack_state_write_current "${STACK_ID}" "${PROJECT_ID}" "${REGION}" "${ZONE}" "${LIFECYCLE}"
+  local instance_name template_name router_name nat_name labels_csv
+  local resolved_project resolved_region resolved_zone
+  local -a install_cmd
+
+  instance_name="$(oc_stack_instance_name "${STACK_ID}")"
+  template_name="$(oc_stack_template_name "${STACK_ID}")"
+  router_name="$(oc_stack_router_name "${STACK_ID}")"
+  nat_name="$(oc_stack_nat_name "${STACK_ID}")"
+  labels_csv="$(oc_stack_labels_csv "${STACK_ID}" "${LIFECYCLE}")"
+
+  install_cmd=(
+    bash "${INSTALL_SCRIPT}"
+    --instance-name "${instance_name}"
+    --template-name "${template_name}"
+    --router-name "${router_name}"
+    --nat-name "${nat_name}"
+    --resource-labels "${labels_csv}"
+  )
+  [[ -n "${PROJECT_ID}" ]] && install_cmd+=(--project-id "${PROJECT_ID}")
+  [[ -n "${REGION}" ]] && install_cmd+=(--region "${REGION}")
+  [[ -n "${ZONE}" ]] && install_cmd+=(--zone "${ZONE}")
+  install_cmd+=("${INSTALL_PASSTHROUGH_ARGS[@]}")
 
   cat <<EOF
-[up] Phase 1 stack contract is ready.
-The install-engine wiring lands in Story 2 follow-up work.
+[up] Stack contract resolved.
+Delegating bring-up to scripts/openclaw-gcp/install.sh with derived names.
 
 $(oc_stack_print_contract "${STACK_ID}" "${LIFECYCLE}")
 EOF
+
+  "${install_cmd[@]}"
+
+  if [[ "${UP_DRY_RUN}" == "true" ]]; then
+    echo "Dry-run mode: skipping current-stack state write."
+    return 0
+  fi
+
+  resolved_project="${PROJECT_ID}"
+  if [[ -z "${resolved_project}" ]] && command -v gcloud >/dev/null 2>&1; then
+    resolved_project="$(gcloud config get-value project 2>/dev/null || true)"
+    [[ "${resolved_project}" == "(unset)" ]] && resolved_project=""
+  fi
+  resolved_region="${REGION:-asia-southeast1}"
+  resolved_zone="${ZONE:-asia-southeast1-a}"
+  oc_stack_state_write_current "${STACK_ID}" "${resolved_project}" "${resolved_region}" "${resolved_zone}" "${LIFECYCLE}"
+  echo "Saved current stack convenience state to $(oc_stack_state_file)"
 }
 
 run_status() {

@@ -19,6 +19,9 @@ NO_ADDRESS="true"
 DRY_RUN="false"
 NON_INTERACTIVE_MODE="auto"
 IAP_SSH_SOURCE_RANGE="35.235.240.0/20"
+ROUTER_NAME="oc-router"
+NAT_NAME="oc-nat"
+RESOURCE_LABELS=""
 STARTUP_PROFILE_EXPECTED="vm-prereqs-v1"
 STARTUP_SOURCE_EXPECTED="embedded-vm-prereqs-v1"
 STARTUP_CONTRACT_VERSION_EXPECTED="startup-ready-v1"
@@ -54,6 +57,9 @@ Options:
   --template-name <name>        Instance template name (default: ${TEMPLATE_NAME})
   --region <region>             Region (default: ${REGION})
   --zone <zone>                 Zone (default: ${ZONE})
+  --router-name <name>          Cloud Router name (default: ${ROUTER_NAME})
+  --nat-name <name>             Cloud NAT name (default: ${NAT_NAME})
+  --resource-labels <csv>       Labels applied to labelable resources in this provisioning path
   --openclaw-image <image>      Legacy template metadata image value (default: ${OPENCLAW_IMAGE})
   --openclaw-tag <tag>          Legacy template metadata tag value (required when provisioning a new VM)
   --service-account <email>     Service account for template-created VMs
@@ -534,10 +540,13 @@ build_create_instance_cmd() {
     --template-name "${TEMPLATE_NAME}"
     --region "${REGION}"
     --zone "${ZONE}"
+    --router-name "${ROUTER_NAME}"
+    --nat-name "${NAT_NAME}"
   )
 
   [[ -n "${OPENCLAW_IMAGE}" ]] && CREATE_INSTANCE_CMD+=(--openclaw-image "${OPENCLAW_IMAGE}")
   [[ -n "${OPENCLAW_TAG}" ]] && CREATE_INSTANCE_CMD+=(--openclaw-tag "${OPENCLAW_TAG}")
+  [[ -n "${RESOURCE_LABELS}" ]] && CREATE_INSTANCE_CMD+=(--resource-labels "${RESOURCE_LABELS}")
 
   if [[ "${NO_SERVICE_ACCOUNT}" == "true" ]]; then
     CREATE_INSTANCE_CMD+=(--no-service-account)
@@ -563,6 +572,9 @@ while [[ $# -gt 0 ]]; do
     --template-name) require_option_value "--template-name" "${2-}"; TEMPLATE_NAME="$2"; shift 2 ;;
     --region) require_option_value "--region" "${2-}"; REGION="$2"; shift 2 ;;
     --zone) require_option_value "--zone" "${2-}"; ZONE="$2"; shift 2 ;;
+    --router-name) require_option_value "--router-name" "${2-}"; ROUTER_NAME="$2"; shift 2 ;;
+    --nat-name) require_option_value "--nat-name" "${2-}"; NAT_NAME="$2"; shift 2 ;;
+    --resource-labels) require_option_value "--resource-labels" "${2-}"; RESOURCE_LABELS="$2"; shift 2 ;;
     --openclaw-image) require_option_value "--openclaw-image" "${2-}"; OPENCLAW_IMAGE="$2"; shift 2 ;;
     --openclaw-tag) require_option_value "--openclaw-tag" "${2-}"; OPENCLAW_TAG="$2"; shift 2 ;;
     --service-account) require_option_value "--service-account" "${2-}"; SERVICE_ACCOUNT="$2"; NO_SERVICE_ACCOUNT="false"; shift 2 ;;
