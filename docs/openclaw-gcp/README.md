@@ -89,7 +89,7 @@ Inherited safety/behavior from the existing install engine:
 - create-or-reuse behavior
 - readiness gating
 - repair of eligible legacy startup contracts
-- interactive IAP SSH handoff to `curl -fsSL https://openclaw.ai/install.sh | bash`
+- interactive IAP SSH handoff to a SHA-256-pinned upstream installer fetched from `https://openclaw.ai/install.sh`
 
 ## `status`
 
@@ -175,7 +175,7 @@ Example sources:
 Behavior:
 - in interactive Cloud Shell only, defaults to the remembered current stack
 - outside interactive Cloud Shell, requires `--stack-id`
-- requires a resolvable project context
+- requires a resolvable project context, preferring explicit or live `gcloud` context over remembered local state
 - verifies the instance/template anchors in GCP before delegating to destroy
 - delegates real teardown to [`scripts/openclaw-gcp/destroy.sh`](../../scripts/openclaw-gcp/destroy.sh)
 - clears the remembered current-stack pointer after a successful real teardown of that stack

@@ -61,7 +61,7 @@ Router and NAT stay deterministic companion resources derived from the stack ID 
 ## What Persists In Cloud Shell
 
 This repo stores a small convenience pointer at `~/.config/openclaw-gcp/current-stack.env`.
-That file remembers the current stack plus the last-known project, region, and zone so the next `status` or `down` command can stay simple.
+That file remembers the current stack plus the last-known project, region, and zone so the next `status` and interactive Cloud Shell `down` can stay simple.
 
 In normal Cloud Shell usage, `$HOME` is persistent, so that file usually survives when you come back later.
 But Cloud Shell itself is still a temporary VM, `gcloud` tab preferences do not persist by default, and ephemeral Cloud Shell sessions can discard local state entirely.
@@ -128,10 +128,10 @@ Outside interactive Cloud Shell sessions, use `--stack-id` explicitly.
 
 ## Safety Properties Kept Intact
 
-- `up` still uses the existing preflight checks, create-or-reuse logic, readiness gating, repair path, and upstream installer handoff from [`scripts/openclaw-gcp/install.sh`](scripts/openclaw-gcp/install.sh).
+- `up` still uses the existing preflight checks, create-or-reuse logic, readiness gating, repair path, and a SHA-256-pinned upstream installer handoff from [`scripts/openclaw-gcp/install.sh`](scripts/openclaw-gcp/install.sh).
 - `ssh` and `logs` still require stack-anchor verification and keep the IAP-only remote access posture.
 - `down` still uses the existing exact-name qualification checks, deterministic delete ordering, typed confirmation, and dry-run behavior from [`scripts/openclaw-gcp/destroy.sh`](scripts/openclaw-gcp/destroy.sh).
-- Teardown now adds one extra safety layer before delegation: the wrapper refuses to tear down if the labeled instance/template anchors do not match the requested stack.
+- Teardown now adds one extra safety layer before delegation: the wrapper refuses to tear down if the labeled instance/template anchors do not match the requested stack, and destructive project targeting prefers explicit or live project context over remembered local state.
 
 ## Direct Engines Still Available
 

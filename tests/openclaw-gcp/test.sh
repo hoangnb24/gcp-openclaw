@@ -28,6 +28,13 @@ run_capture() {
   set -e
 }
 
+run_capture_with_tty() {
+  set +e
+  RUN_OUTPUT="$(script -q /dev/null "$@" 2>&1)"
+  RUN_STATUS=$?
+  set -e
+}
+
 assert_status() {
   local expected="$1"
   local message="$2"
@@ -961,6 +968,40 @@ EOF
 
   assert_status 1 "wrapper down requires an explicit stack outside interactive Cloud Shell even when current state exists"
   assert_contains "${RUN_OUTPUT}" "down requires --stack-id outside interactive Cloud Shell sessions" "wrapper down explains the non-interactive explicit-stack requirement"
+  if [[ -f "${mock_dir}/gcloud.log" ]] && [[ -s "${mock_dir}/gcloud.log" ]]; then
+    fail "wrapper down non-interactive refusal should happen before gcloud lookups"
+    cat "${mock_dir}/gcloud.log"
+  else
+    pass "wrapper down non-interactive refusal happens before any remote target lookup"
+  fi
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    GOOGLE_CLOUD_PROJECT=staging-project \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" down \
+    --stack-id team-dev \
+    --dry-run
+
+  assert_status 0 "wrapper down prefers live project context over remembered project state"
+  assert_contains "${RUN_OUTPUT}" "project_id=staging-project" "wrapper down reports the live project context when state is stale"
+
+  local log_content
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_contains "${log_content}" "--project staging-project" "wrapper down verifies anchors against the live project context instead of remembered state"
+
+  run_capture_with_tty env \
+    HOME="${home_dir}" \
+    PATH="${mock_dir}/bin:${PATH}" \
+    MOCK_GCLOUD_LOG="${mock_dir}/gcloud.log" \
+    CLOUD_SHELL=true \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" down --dry-run
+
+  assert_status 0 "wrapper down allows remembered current stack in interactive Cloud Shell sessions"
+  assert_contains "${RUN_OUTPUT}" "selection_source=current-state" "wrapper down reports current-state selection in interactive Cloud Shell"
 
   run_capture run_with_mock "${mock_dir}" \
     HOME="${home_dir}" \
@@ -1371,7 +1412,12 @@ test_install_ssh_handoff_contract_and_failure_summary() {
   assert_status 0 "install.sh dry-run prints interactive SSH handoff command contract"
   assert_contains "${RUN_OUTPUT}" "Dry-run command (interactive SSH handoff):" "install.sh dry-run prints handoff command"
   assert_contains "${RUN_OUTPUT}" "--tunnel-through-iap" "install.sh handoff command preserves IAP SSH posture"
-  assert_contains "${RUN_OUTPUT}" "curl -fsSL https://openclaw.ai/install.sh | bash" "install.sh handoff command includes upstream installer"
+  assert_contains "${RUN_OUTPUT}" "Handoff installer source: https://openclaw.ai/install.sh" "install.sh reports the pinned installer source"
+  assert_contains "${RUN_OUTPUT}" "Handoff installer sha256: 3b8aa27c0c9aa34c4b401d669287c22de9c03f6cdcb94fbc16a73c285307e788" "install.sh reports the pinned installer digest"
+  assert_contains "${RUN_OUTPUT}" "INSTALLER_SHA256=\\\"3b8aa27c0c9aa34c4b401d669287c22de9c03f6cdcb94fbc16a73c285307e788\\\"" "install.sh dry-run embeds the installer verification contract"
+  assert_contains "${RUN_OUTPUT}" "download_installer" "install.sh dry-run includes the remote download helper"
+  assert_contains "${RUN_OUTPUT}" "sha256_of_file" "install.sh dry-run includes the remote SHA-256 verification helper"
+  assert_not_contains "${RUN_OUTPUT}" "curl -fsSL https://openclaw.ai/install.sh | bash" "install.sh dry-run no longer executes curl pipe bash directly"
   assert_contains "${RUN_OUTPUT}" "umask\\ 077" "install.sh handoff command hardens transcript umask"
   assert_contains "${RUN_OUTPUT}" "mkdir\\ -m\\ 700\\ -p" "install.sh handoff command creates transcript directory with private permissions"
   assert_contains "${RUN_OUTPUT}" "chmod\\ 600\\ " "install.sh handoff command hardens transcript file permissions"

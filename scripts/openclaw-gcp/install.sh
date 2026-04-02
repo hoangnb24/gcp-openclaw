@@ -31,7 +31,10 @@ READINESS_LOG_HINT_LINES="200"
 INSTALL_LOG_DIR_REMOTE="\$HOME/.openclaw-gcp/install-logs"
 INSTALL_LOG_LATEST_REMOTE="${INSTALL_LOG_DIR_REMOTE}/latest.log"
 INSTALL_LOG_HINT_LINES="200"
-UPSTREAM_INSTALL_CMD="curl -fsSL https://openclaw.ai/install.sh | bash"
+UPSTREAM_INSTALL_URL="https://openclaw.ai/install.sh"
+UPSTREAM_INSTALL_SHA256="3b8aa27c0c9aa34c4b401d669287c22de9c03f6cdcb94fbc16a73c285307e788"
+UPSTREAM_INSTALL_CACHE_DIR_REMOTE="\$HOME/.openclaw-gcp/install-cache"
+UPSTREAM_INSTALL_PATH_REMOTE="${UPSTREAM_INSTALL_CACHE_DIR_REMOTE}/install-${UPSTREAM_INSTALL_SHA256}.sh"
 READINESS_SSH_MAX_ATTEMPTS="${OPENCLAW_READINESS_SSH_MAX_ATTEMPTS:-19}"
 READINESS_SSH_RETRY_DELAY_SECONDS="${OPENCLAW_READINESS_SSH_RETRY_DELAY_SECONDS:-10}"
 INSTANCE_REUSED="false"
@@ -455,13 +458,83 @@ build_install_handoff_ssh_cmd() {
 set -euo pipefail
 LOG_DIR="${INSTALL_LOG_DIR_REMOTE}"
 LATEST_LOG="${INSTALL_LOG_LATEST_REMOTE}"
-INSTALLER_CMD="${UPSTREAM_INSTALL_CMD}"
+INSTALLER_URL="${UPSTREAM_INSTALL_URL}"
+INSTALLER_SHA256="${UPSTREAM_INSTALL_SHA256}"
+INSTALLER_CACHE_DIR="${UPSTREAM_INSTALL_CACHE_DIR_REMOTE}"
+INSTALLER_PATH="${UPSTREAM_INSTALL_PATH_REMOTE}"
 umask 077
 mkdir -m 700 -p "\${LOG_DIR}"
 chmod 700 "\${LOG_DIR}"
+mkdir -m 700 -p "\${INSTALLER_CACHE_DIR}"
+chmod 700 "\${INSTALLER_CACHE_DIR}"
 RUN_LOG="\${LOG_DIR}/install-\$(date -u +%Y%m%dT%H%M%SZ).log"
 touch "\${RUN_LOG}"
 chmod 600 "\${RUN_LOG}"
+
+download_installer() {
+  local url="\$1"
+  local output="\$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 1 --retry-connrefused -o "\${output}" "\${url}"
+    return 0
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    wget -q --https-only --secure-protocol=TLSv1_2 --tries=3 --timeout=20 -O "\${output}" "\${url}"
+    return 0
+  fi
+  echo "[handoff] missing downloader (curl or wget required)" >&2
+  exit 43
+}
+
+sha256_of_file() {
+  local path="\$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "\${path}" | awk '{print tolower(\$1)}'
+    return 0
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "\${path}" | awk '{print tolower(\$1)}'
+    return 0
+  fi
+  if command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "\${path}" | awk '{print tolower(\$NF)}'
+    return 0
+  fi
+  echo "[handoff] missing SHA-256 tool (need sha256sum, shasum, or openssl)" >&2
+  exit 44
+}
+
+ensure_verified_installer() {
+  local actual_sha=""
+  local tmp_path=""
+
+  if [[ -f "\${INSTALLER_PATH}" ]]; then
+    actual_sha="\$(sha256_of_file "\${INSTALLER_PATH}")"
+    if [[ "\${actual_sha}" == "\${INSTALLER_SHA256}" ]]; then
+      echo "[handoff] using cached verified installer: \${INSTALLER_PATH}"
+      return 0
+    fi
+    echo "[handoff] cached installer checksum mismatch; refreshing \${INSTALLER_PATH}" >&2
+    rm -f "\${INSTALLER_PATH}"
+  fi
+
+  tmp_path="\${INSTALLER_PATH}.tmp.\$\$"
+  download_installer "\${INSTALLER_URL}" "\${tmp_path}"
+  actual_sha="\$(sha256_of_file "\${tmp_path}")"
+  if [[ "\${actual_sha}" != "\${INSTALLER_SHA256}" ]]; then
+    rm -f "\${tmp_path}"
+    echo "[handoff] installer checksum mismatch: expected \${INSTALLER_SHA256}, got \${actual_sha}" >&2
+    exit 45
+  fi
+
+  mv "\${tmp_path}" "\${INSTALLER_PATH}"
+  chmod 600 "\${INSTALLER_PATH}"
+  echo "[handoff] downloaded and verified installer: \${INSTALLER_PATH}"
+}
+
+ensure_verified_installer
+printf -v INSTALLER_CMD '%q %q' /bin/bash "\${INSTALLER_PATH}"
+
 echo "[handoff] launching upstream installer with PTY transcript capture"
 echo "[handoff] run log: \${RUN_LOG}"
 if ! command -v script >/dev/null 2>&1; then
@@ -495,7 +568,8 @@ EOF
 run_install_handoff() {
   build_install_handoff_ssh_cmd
   echo "Interactive SSH handoff stage: launching upstream installer."
-  echo "Handoff installer command: ${UPSTREAM_INSTALL_CMD}"
+  echo "Handoff installer source: ${UPSTREAM_INSTALL_URL}"
+  echo "Handoff installer sha256: ${UPSTREAM_INSTALL_SHA256}"
   echo "Remote installer log contract: ${INSTALL_LOG_LATEST_REMOTE}"
 
   if [[ "${DRY_RUN}" == "true" ]]; then

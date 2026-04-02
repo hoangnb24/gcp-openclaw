@@ -8,6 +8,7 @@ WRAPPER_PATH="${REPO_ROOT}/bin/openclaw-gcp"
 STACK_ID=""
 ASSUME_YES="false"
 NON_INTERACTIVE="false"
+CURRENT_PROJECT_ID=""
 
 print_help() {
   cat <<EOF
@@ -37,6 +38,15 @@ require_option_value() {
 
 is_interactive_session() {
   [[ -t 0 && -t 1 ]]
+}
+
+resolve_current_project_id() {
+  local value=""
+  if command -v gcloud >/dev/null 2>&1; then
+    value="$(gcloud config get-value project 2>/dev/null || true)"
+    [[ "${value}" == "(unset)" ]] && value=""
+  fi
+  printf '%s\n' "${value}"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -76,6 +86,8 @@ if [[ -z "${STACK_ID}" ]]; then
   [[ -n "${STACK_ID}" ]] || die "stack ID cannot be empty"
 fi
 
+CURRENT_PROJECT_ID="$(resolve_current_project_id)"
+
 cat <<EOF
 OpenClaw GCP Cloud Shell Welcome
 ===============================
@@ -87,6 +99,13 @@ Next command:
   ./bin/openclaw-gcp up --stack-id ${STACK_ID}
 
 This stack ID becomes your explicit operator identity for the Phase 1 flow.
+This flow expects an existing accessible GCP project.
+It does not create GCP projects for you.
+Current gcloud project: ${CURRENT_PROJECT_ID:-not set}
+Set one now with:
+  gcloud config set project <PROJECT_ID>
+Or pass it explicitly to up:
+  ./bin/openclaw-gcp up --stack-id ${STACK_ID} --project-id <PROJECT_ID>
 After a real up run, the current stack pointer is stored at:
   $HOME/.config/openclaw-gcp/current-stack.env
 That file is convenience state for Cloud Shell. The durable ownership truth remains the GCP labels on the stack's instance/template anchors.

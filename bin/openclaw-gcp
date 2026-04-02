@@ -430,6 +430,17 @@ resolve_project_context() {
   printf '%s\n' "${value}"
 }
 
+resolve_live_project_context() {
+  local value="${PROJECT_ID:-}"
+  [[ -n "${value}" ]] || value="${GOOGLE_CLOUD_PROJECT:-}"
+  [[ -n "${value}" ]] || value="${CLOUDSDK_CORE_PROJECT:-}"
+  if [[ -z "${value}" ]] && command_exists gcloud; then
+    value="$(gcloud config get-value project 2>/dev/null || true)"
+    [[ "${value}" == "(unset)" ]] && value=""
+  fi
+  printf '%s\n' "${value}"
+}
+
 resolve_region_context() {
   local value="${REGION:-}"
   [[ -n "${value}" ]] || value="$(oc_stack_state_get_or_empty LAST_REGION)"
@@ -627,7 +638,7 @@ resolve_stack_id_for_down() {
     return 0
   fi
 
-  if oc_stack_is_cloud_shell && oc_stack_is_interactive_session; then
+  if oc_stack_is_cloud_shell && [[ "${DOWN_FORCE_NON_INTERACTIVE}" != "true" ]] && oc_stack_is_interactive_session; then
     remembered="$(oc_stack_state_get_or_empty CURRENT_STACK_ID)"
     if [[ -n "${remembered}" ]]; then
       SELECTION_SOURCE="current-state"
@@ -637,6 +648,15 @@ resolve_stack_id_for_down() {
   fi
 
   die "down requires --stack-id outside interactive Cloud Shell sessions, or when no current stack is remembered in $(oc_stack_state_file)"
+}
+
+resolve_project_context_for_down() {
+  local value=""
+  value="$(resolve_live_project_context)"
+  if [[ -z "${value}" ]] && oc_stack_is_cloud_shell && [[ "${DOWN_FORCE_NON_INTERACTIVE}" != "true" ]] && oc_stack_is_interactive_session; then
+    value="$(oc_stack_state_get_or_empty LAST_PROJECT_ID)"
+  fi
+  printf '%s\n' "${value}"
 }
 
 resource_label_tuple() {
@@ -1012,7 +1032,7 @@ run_down() {
   parse_down_args "$@"
   resolve_stack_id_for_down "${STACK_ID}"
   STACK_ID="${RESOLVED_STACK_ID}"
-  resolved_project="$(resolve_project_context)"
+  resolved_project="$(resolve_project_context_for_down)"
   resolved_region="$(resolve_region_context)"
   resolved_zone="$(resolve_zone_context "${resolved_region}")"
 
