@@ -1,6 +1,6 @@
 # Phase Plan: OpenClaw GCP Cloud-Shell-First UX
 
-**Date**: 2026-04-01
+**Date**: 2026-04-02
 **Feature**: `openclaw-gcp-cloud-shell-first`
 **Based on**:
 - `history/openclaw-gcp-cloud-shell-first/CONTEXT.md`
@@ -81,6 +81,6 @@ This feature turns the repo from “run the installer script if you already unde
 
 ## 6. Approval Summary
 
-- **Current phase to prepare next**: `Phase 1 - Browser-First Stack Workflow`
-- **What the user should picture after that phase**: clicking the official Cloud Shell button and using one stack-native `up` / `status` / `down` flow without thinking about template/router/NAT names.
-- **What will not happen until later phases**: robust recovery from missing local context and nicer day-2 commands like `ssh` and `logs`.
+- **Current phase to prepare next**: `Phase 3 - Day-2 Operator Ergonomics`
+- **What the user should picture after that phase**: after `up` or recovery, the wrapper becomes a practical day-2 surface where an operator can run `ssh`, fetch known logs, and script against richer `status --json` output without reconstructing raw `gcloud` commands.
+- **What will not happen until later work**: broader multi-stack listing, richer lifecycle controls, or a hosted control plane remain outside this feature's planned phases.

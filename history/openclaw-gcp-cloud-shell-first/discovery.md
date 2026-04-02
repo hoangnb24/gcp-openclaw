@@ -203,3 +203,30 @@ make test
 
 **Institutional warnings to honor**:
 - No prior institutional learnings for this domain.
+
+---
+
+## Phase 3 Planning Addendum
+
+**Date**: 2026-04-02
+
+### Additional Architecture Findings
+
+- `bin/openclaw-gcp` already owns the stack-native command surface, so adding `ssh` and `logs` there keeps the wrapper thin and avoids new top-level entrypoints.
+- `bin/openclaw-gcp status --json` already exists, which means Phase 3 can strengthen a real machine-readable contract instead of introducing an unrelated new automation interface.
+- `scripts/openclaw-gcp/lib-stack.sh` already owns stack naming plus convenience state and is the natural place for any small shared day-2 helper constants if the wrapper needs them.
+
+### Additional Pattern Findings
+
+- `scripts/openclaw-gcp/install.sh` already defines the repo’s best-known SSH and remote-log contracts:
+  - readiness log: `~/.openclaw-gcp/install-logs/readiness-gate.log`
+  - installer transcript symlink: `~/.openclaw-gcp/install-logs/latest.log`
+  - IAP-backed SSH invocation shape for both readiness and interactive handoff
+- `scripts/openclaw-gcp/bootstrap-openclaw.sh` already documents the current Docker deployment’s gateway log entrypoint: `docker logs --tail 100 openclaw_openclaw-gateway_1`
+- The current tests cover bring-up, teardown, and recovery well, but there is not yet wrapper-level coverage for first-class `ssh` or `logs` commands.
+
+### Phase 3 Constraints
+
+- A new `ssh` command should reuse existing stack resolution and anchor verification instead of bypassing them.
+- A new `logs` command should expose only known, documented log sources rather than pretending to be a general remote log browser.
+- Phase 3 should grow `status --json` additively and leave the default human-readable summary intact.

@@ -1,17 +1,23 @@
-PHASE: planning
+STATUS: compounding-complete
 FEATURE: openclaw-gcp-cloud-shell-first
-CURRENT_PHASE: Phase 2 - Recovery When Context Is Missing
-PREVIOUS_PHASE: Phase 1 - Browser-First Stack Workflow
-PREVIOUS_PHASE_COMPLETED_AT: 2026-04-01T13:47:34Z
-LAST_COMPLETED_EPIC: br-1ej
-LAST_COMPLETED_TOPIC: epic-br-1ej
-CURRENT_INTENT: Prepare Phase 2 planning artifacts now that Phase 1 browser-first stack workflow work is closed and verified.
-NEXT_STEP: Invoke khuym:planning for Phase 2 - Recovery When Context Is Missing.
+EPIC: br-ioc
+PHASE: Compounding
+HANDOFF: next-feature
+REVIEW_GATE: passed
+REVIEW_NOTES:
+- Blocking review beads `br-3l2` and `br-2o3` were fixed and verified with `bash tests/openclaw-gcp/test.sh` and `make test`.
+- Non-blocking review follow-ups remain open: `br-2t5`, `br-3ea`, `br-3c6`, `br-ir4`.
+- Human UAT items were skipped in this session and accepted explicitly by the user before finishing.
+ARTIFACTS:
+- Archived final review narrative: `history/openclaw-gcp-cloud-shell-first/STATE-final.md`
+- Learnings file: `history/learnings/20260402-stack-safety-installer-integrity.md`
+- Critical patterns index: `history/learnings/critical-patterns.md`
+- Review state mirror: `.khuym/state.json`
+FLAGGED_LEARNINGS: 6 captured into `history/learnings/20260402-stack-safety-installer-integrity.md`
+NEXT_STEP: Start the next feature with `history/learnings/critical-patterns.md` and the feature learnings entry in view.
 
-## Active Workers
-- none
-
-## Phase 1 Closeout
-- Epic `br-1ej` is closed.
-- Verification completed with `bash tests/openclaw-gcp/test.sh` and `make test`.
-- Agent Mail closeout sent on topic `epic-br-1ej`.
+## Last Compounding Run
+- Feature: openclaw-gcp-cloud-shell-first
+- Date: 2026-04-02
+- Learnings file: history/learnings/20260402-stack-safety-installer-integrity.md
+- Critical promotions: 2

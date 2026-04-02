@@ -178,3 +178,39 @@ No prior institutional learnings relevant to this feature.
 - [ ] What should happen when local current-stack state exists but no longer matches labeled resources in GCP?
 - [x] Should the current-stack state include last-known project/region/zone explicitly so the UX is resilient to Cloud Shell’s non-persistent `gcloud` preferences?
   Resolution: yes. Phase 1 should persist that last-known context as convenience metadata while still treating GCP-backed anchors as the durable truth.
+
+---
+
+## 9. Phase 3 Extension
+
+Phase 3 should continue the same thin-wrapper philosophy rather than opening a new architectural lane.
+
+### Recommended Phase 3 Shape
+
+- Add `ssh` to `bin/openclaw-gcp` and make it reuse the same stack-resolution and anchor-verification rules already trusted by `status` and `down`.
+- Add `logs` to `bin/openclaw-gcp` and restrict it to a named set of remote log sources already grounded in repo behavior:
+  - readiness
+  - install
+  - bootstrap
+  - gateway
+- Expand `status --json` rather than invent a second machine-readable command surface.
+- Keep docs and tests as first-class contract work, because these day-2 commands are only useful if operators and automation can trust the exact same behavior.
+
+### Phase 3 High-Risk Components
+
+| Component | Risk Level | Reason | Verification Needed |
+|-----------|------------|--------|---------------------|
+| Shared remote-access contract for `ssh` and `logs` | **HIGH** | The wrapper must preserve stack-anchor safety while opening a live operator shell path | Validate whether the current `status`/`down` anchor checks are the right gate for day-2 remote access |
+| Named remote log-source contract | **HIGH** | The repo has real log seams, but Phase 3 must expose only sources that are truthful and supportable | Validate the exact source list and fail-closed behavior before implementation |
+| Richer `status --json` contract | **MEDIUM** | The command already exists, but automation fields need to stay additive and consistent | Shell assertions for JSON fields and recovery/state semantics |
+
+### Phase 3 Proposed File Focus
+
+```text
+bin/openclaw-gcp                               # add ssh/logs and richer json output
+scripts/openclaw-gcp/lib-stack.sh             # optional small shared helpers/constants
+README.md                                     # advanced day-2 command examples
+docs/openclaw-gcp/README.md                   # runbook-level ssh/logs/json guidance
+docs/openclaw-gcp/cloud-shell-quickstart.md   # browser-first day-2 follow-on path
+tests/openclaw-gcp/test.sh                    # mocked shell coverage for new commands
+```
