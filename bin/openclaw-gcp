@@ -31,6 +31,7 @@ DOWN_FORCE_INTERACTIVE="false"
 DOWN_FORCE_NON_INTERACTIVE="false"
 INSTALL_PASSTHROUGH_ARGS=()
 DESTROY_PASSTHROUGH_ARGS=()
+SSH_PASSTHROUGH_ARGS=()
 RESOLVED_STACK_ID=""
 RECOVERY_NOTE=""
 RECOVERY_CANDIDATES_CSV=""
@@ -48,6 +49,7 @@ Commands:
   welcome   Run the non-mutating Cloud Shell welcome flow
   up        Bring up one named stack through the existing install engine
   status    Show the current or explicit stack with GCP-backed anchor checks
+  ssh       Open an IAP-backed shell on the verified stack instance
   down      Tear down one stack through the existing destroy engine
   help      Show this help text
 
@@ -87,6 +89,13 @@ EOF
 Usage: $(basename "$0") status [--stack-id <id>] [--project-id <id>] [--region <region>] [--zone <zone>] [--json]
 
 Show the current or explicit stack, local convenience state, and GCP-backed anchor verification.
+EOF
+      ;;
+    ssh)
+      cat <<EOF
+Usage: $(basename "$0") ssh [--stack-id <id>] [--project-id <id>] [--region <region>] [--zone <zone>] [-- [ssh args]]
+
+Open an IAP-backed shell for a verified stack instance.
 EOF
       ;;
     down)
@@ -293,6 +302,53 @@ parse_down_args() {
         DOWN_FORCE_NON_INTERACTIVE="true"
         DESTROY_PASSTHROUGH_ARGS+=("$1")
         shift
+        ;;
+      -h|--help)
+        command_usage "${COMMAND}"
+        exit 0
+        ;;
+      *)
+        die "unknown option for ${COMMAND}: $1"
+        ;;
+    esac
+  done
+}
+
+parse_ssh_args() {
+  STACK_ID=""
+  PROJECT_ID=""
+  REGION=""
+  ZONE=""
+  SSH_PASSTHROUGH_ARGS=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack-id)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --stack-id"
+        STACK_ID="$2"
+        shift 2
+        ;;
+      --project-id)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --project-id"
+        PROJECT_ID="$2"
+        shift 2
+        ;;
+      --region)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --region"
+        REGION="$2"
+        shift 2
+        ;;
+      --zone)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --zone"
+        ZONE="$2"
+        shift 2
+        ;;
+      --)
+        shift
+        while [[ $# -gt 0 ]]; do
+          SSH_PASSTHROUGH_ARGS+=("$1")
+          shift
+        done
         ;;
       -h|--help)
         command_usage "${COMMAND}"
@@ -653,6 +709,36 @@ verify_stack_anchors_or_die() {
   (( verified_count > 0 )) || die "stack anchor verification failed for stack '${stack_id}'. Neither the instance nor template exists with matching OpenClaw stack labels in project '${project_id}'."
 }
 
+verify_stack_remote_access_or_die() {
+  local stack_id="$1"
+  local project_id="$2"
+  local region="$3"
+  local zone="$4"
+  local instance_name template_name
+  local mismatch_messages=()
+
+  instance_name="$(oc_stack_instance_name "${stack_id}")"
+  template_name="$(oc_stack_template_name "${stack_id}")"
+
+  inspect_anchor "instance" "${instance_name}" "${project_id}" "${zone}" "${stack_id}"
+  if [[ "${ANCHOR_EXISTS}" != "true" ]]; then
+    die "remote access verification failed for stack '${stack_id}'. Instance '${instance_name}' is missing in project '${project_id}' zone '${zone}'."
+  fi
+  if [[ "${ANCHOR_VERIFIED}" != "true" ]]; then
+    mismatch_messages+=("instance ${instance_name}: ${ANCHOR_NOTE}")
+  fi
+
+  inspect_anchor "template" "${template_name}" "${project_id}" "${region}" "${stack_id}"
+  if [[ "${ANCHOR_EXISTS}" == "true" && "${ANCHOR_VERIFIED}" != "true" ]]; then
+    mismatch_messages+=("template ${template_name}: ${ANCHOR_NOTE}")
+  fi
+
+  if (( ${#mismatch_messages[@]} > 0 )); then
+    printf '%s\n' "${mismatch_messages[@]}" >&2
+    die "remote access verification failed for stack '${stack_id}'. Refusing SSH because stack anchors are not trustworthy."
+  fi
+}
+
 run_welcome() {
   [[ -x "${WELCOME_SCRIPT}" ]] || die "welcome script is not executable: ${WELCOME_SCRIPT}"
   exec "${WELCOME_SCRIPT}" "$@"
@@ -910,6 +996,51 @@ EOF
   fi
 }
 
+run_ssh() {
+  local resolved_project resolved_region resolved_zone
+  local instance_name
+  local remembered_stack_id
+  local -a ssh_cmd
+
+  parse_ssh_args "$@"
+  resolved_project="$(resolve_project_context)"
+  resolved_region="$(resolve_region_context)"
+  resolved_zone="$(resolve_zone_context "${resolved_region}")"
+
+  [[ -n "${resolved_project}" ]] || die "ssh has insufficient context: no project resolved. Pass --project-id or run 'up' once so LAST_PROJECT_ID is recorded in $(oc_stack_state_file)."
+  command_exists gcloud || die "ssh requires gcloud in PATH."
+
+  remembered_stack_id="$(oc_stack_state_get_or_empty CURRENT_STACK_ID)"
+  resolve_stack_id_for_status "${STACK_ID}" "${remembered_stack_id}" "${resolved_project}"
+  STACK_ID="${RESOLVED_STACK_ID}"
+
+  instance_name="$(oc_stack_instance_name "${STACK_ID}")"
+  verify_stack_remote_access_or_die "${STACK_ID}" "${resolved_project}" "${resolved_region}" "${resolved_zone}"
+
+  ssh_cmd=(
+    gcloud compute ssh "${instance_name}"
+    --project "${resolved_project}"
+    --zone "${resolved_zone}"
+    --tunnel-through-iap
+  )
+  if (( ${#SSH_PASSTHROUGH_ARGS[@]} > 0 )); then
+    ssh_cmd+=(-- "${SSH_PASSTHROUGH_ARGS[@]}")
+  fi
+
+  cat <<EOF
+[ssh] Stack anchors verified through GCP labels.
+Opening IAP-backed SSH for stack '${STACK_ID}'.
+
+selection_source=${SELECTION_SOURCE}
+project_id=${resolved_project}
+region=${resolved_region}
+zone=${resolved_zone}
+instance_name=${instance_name}
+EOF
+
+  exec "${ssh_cmd[@]}"
+}
+
 COMMAND="${1:-help}"
 if [[ $# -gt 0 ]]; then
   shift
@@ -924,6 +1055,9 @@ case "${COMMAND}" in
     ;;
   status)
     run_status "$@"
+    ;;
+  ssh)
+    run_ssh "$@"
     ;;
   down)
     run_down "$@"
