@@ -1079,6 +1079,95 @@ EOF
   assert_contains "${RUN_OUTPUT}" "status has insufficient context" "wrapper status emits the insufficient-context guidance"
 }
 
+test_stack_wrapper_day2_contract() {
+  local mock_dir home_dir state_file log_content unsupported_mock_dir
+  mock_dir="$(new_mock_env stack-wrapper-day2)"
+  home_dir="${mock_dir}/home"
+  mkdir -p "${home_dir}/.config/openclaw-gcp"
+  state_file="${home_dir}/.config/openclaw-gcp/current-stack.env"
+  cat >"${state_file}" <<'EOF'
+# openclaw-gcp local convenience state
+CURRENT_STACK_ID=team-dev
+LAST_PROJECT_ID=hoangnb-openclaw
+LAST_REGION=asia-southeast1
+LAST_ZONE=asia-southeast1-a
+LIFECYCLE=persistent
+EOF
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" ssh \
+    --stack-id team-dev \
+    --project-id hoangnb-openclaw
+
+  assert_status 0 "wrapper ssh uses verified stack contract"
+  assert_contains "${RUN_OUTPUT}" "[ssh] Stack anchors verified through GCP labels." "wrapper ssh reports verified stack anchors"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_contains "${log_content}" "GCLOUD compute ssh oc-team-dev --project hoangnb-openclaw --zone asia-southeast1-a --tunnel-through-iap" "wrapper ssh stays on IAP-backed gcloud compute ssh"
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" logs \
+    --stack-id team-dev \
+    --project-id hoangnb-openclaw \
+    --source readiness
+
+  assert_status 0 "wrapper logs supports named readiness source"
+  assert_contains "${RUN_OUTPUT}" "[logs] Stack anchors verified through GCP labels." "wrapper logs verifies anchors before remote access"
+  assert_contains "${RUN_OUTPUT}" "source=readiness" "wrapper logs reports selected source"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_contains "${log_content}" "readiness-gate.log" "wrapper logs uses readiness source contract"
+
+  unsupported_mock_dir="$(new_mock_env stack-wrapper-day2-unsupported)"
+  run_capture run_with_mock "${unsupported_mock_dir}" \
+    HOME="${home_dir}" \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" logs \
+    --stack-id team-dev \
+    --project-id hoangnb-openclaw \
+    --source unsupported
+
+  assert_status 1 "wrapper logs rejects unsupported named source"
+  assert_contains "${RUN_OUTPUT}" "unsupported logs source 'unsupported'" "wrapper logs reports supported source constraint"
+  if [[ -f "${unsupported_mock_dir}/gcloud.log" ]] && [[ -s "${unsupported_mock_dir}/gcloud.log" ]]; then
+    fail "wrapper logs unsupported source should fail before any gcloud call"
+    cat "${unsupported_mock_dir}/gcloud.log"
+  else
+    pass "wrapper logs unsupported source fails before remote execution"
+  fi
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    MOCK_TEMPLATE_LABEL_OPENCLAW_STACK_ID=other-stack \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" ssh \
+    --stack-id team-dev \
+    --project-id hoangnb-openclaw
+
+  assert_status 1 "wrapper ssh fails closed on template label mismatch"
+  assert_contains "${RUN_OUTPUT}" "Refusing SSH because stack anchors are not trustworthy." "wrapper ssh preserves fail-closed anchor contract"
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" status \
+    --stack-id team-dev \
+    --project-id hoangnb-openclaw \
+    --json
+
+  assert_status 0 "wrapper status --json remains available for automation"
+  assert_contains "${RUN_OUTPUT}" "\"context\":{\"gcloud_available\":true" "wrapper status --json includes context section"
+  assert_contains "${RUN_OUTPUT}" "\"state\":{\"file\":\"" "wrapper status --json includes state section"
+  assert_contains "${RUN_OUTPUT}" "\"recovery\":{\"note\":\"" "wrapper status --json includes recovery section"
+  assert_contains "${RUN_OUTPUT}" "\"selection_source\":\"explicit\"" "wrapper status --json preserves selection source semantics"
+}
+
 test_install_help_and_noninteractive_gcloud_guard() {
   TESTS_RUN=$((TESTS_RUN + 1))
 
@@ -1713,6 +1802,7 @@ main() {
   test_stack_wrapper_state_persists_when_up_fails
   test_stack_wrapper_down_safety_guards
   test_stack_wrapper_recovery_contract
+  test_stack_wrapper_day2_contract
   test_install_help_and_noninteractive_gcloud_guard
   test_install_parser_missing_value_guard
   test_install_prompt_and_nonprompt_behavior
