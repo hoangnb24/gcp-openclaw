@@ -1,9 +1,9 @@
 # OpenClaw on GCP
 
 This repo now treats Cloud Shell as the primary operator terminal for OpenClaw on GCP.
-The main Phase 1 story is:
+The main Phase 3 day-2 story is:
 
-`Open in Cloud Shell -> welcome -> up -> status -> down`
+`Open in Cloud Shell -> welcome -> up -> status -> ssh/logs -> down`
 
 ## Cloud Shell Quickstart
 
@@ -24,12 +24,15 @@ In Cloud Shell, the happy path is:
 ./bin/openclaw-gcp welcome
 ./bin/openclaw-gcp up --stack-id my-stack
 ./bin/openclaw-gcp status
+./bin/openclaw-gcp ssh
+./bin/openclaw-gcp logs --source readiness
 ./bin/openclaw-gcp down
 ```
 
 `welcome` is non-mutating.
 `up` uses your stack ID to derive the VM, template, router, and NAT names automatically and then delegates to the existing install engine underneath.
 `down` delegates to the existing destroy engine, but only after verifying that the stack's labeled GCP anchors match the stack you asked for.
+`ssh` and `logs` use the same stack-selection and anchor-verification safety model as `status` and stay on IAP-backed `gcloud compute ssh`.
 Phase 1 expects an existing accessible GCP project and does not create projects for you.
 Set one with `gcloud config set project <PROJECT_ID>` or pass `--project-id <PROJECT_ID>` to `up`.
 
@@ -95,6 +98,28 @@ Shows the current or explicit stack, the local convenience state, and whether th
 When local state is missing or stale, `status` runs project-scoped label recovery and clearly distinguishes recovered, ambiguous, and insufficient-context outcomes.
 
 ```bash
+./bin/openclaw-gcp status --json
+```
+
+Machine-readable view of the same truth as human `status`.
+The JSON now includes additive `context`, `state`, and `recovery` sections so automation can distinguish recovered, ambiguous, and insufficient-context outcomes without scraping terminal prose.
+
+```bash
+./bin/openclaw-gcp ssh
+```
+
+Opens IAP-backed SSH only after verified labeled anchors confirm the stack identity.
+Fail-closed rules stay explicit: missing project context, missing instance anchor, or mismatched anchors stop the command.
+
+```bash
+./bin/openclaw-gcp logs --source <name>
+```
+
+Fetches named remote logs over the same verified IAP path.
+Supported sources are exact and closed: `readiness`, `install`, `bootstrap`, `gateway`.
+Unsupported or unavailable sources return non-zero with explicit messages.
+
+```bash
 ./bin/openclaw-gcp down
 ```
 
@@ -104,6 +129,7 @@ Outside interactive Cloud Shell sessions, use `--stack-id` explicitly.
 ## Safety Properties Kept Intact
 
 - `up` still uses the existing preflight checks, create-or-reuse logic, readiness gating, repair path, and upstream installer handoff from [`scripts/openclaw-gcp/install.sh`](scripts/openclaw-gcp/install.sh).
+- `ssh` and `logs` still require stack-anchor verification and keep the IAP-only remote access posture.
 - `down` still uses the existing exact-name qualification checks, deterministic delete ordering, typed confirmation, and dry-run behavior from [`scripts/openclaw-gcp/destroy.sh`](scripts/openclaw-gcp/destroy.sh).
 - Teardown now adds one extra safety layer before delegation: the wrapper refuses to tear down if the labeled instance/template anchors do not match the requested stack.
 

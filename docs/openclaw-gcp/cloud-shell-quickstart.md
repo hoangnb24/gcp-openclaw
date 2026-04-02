@@ -108,7 +108,38 @@ Recovery outcomes are explicit:
 - ambiguous: status found multiple candidates and requires `--stack-id`
 - insufficient context: status needs project context or `gcloud` access to recover
 
-## 5. Tear The Stack Down
+Machine-readable status is available when you need scripting-oriented output:
+
+```sh
+./bin/openclaw-gcp status --json
+```
+
+`status --json` includes additive `context`, `state`, and `recovery` sections so automation can make decisions without parsing the human summary.
+
+## 5. Day-2 Access And Logs
+
+Open remote shell through the verified stack contract:
+
+```sh
+./bin/openclaw-gcp ssh
+```
+
+Fetch named remote logs through the same verified IAP path:
+
+```sh
+./bin/openclaw-gcp logs --source readiness
+```
+
+Supported `--source` values are exact and closed:
+
+- `readiness`
+- `install`
+- `bootstrap`
+- `gateway`
+
+The wrapper fails closed for unsupported sources, missing project context, missing instance anchors, or mismatched template anchors.
+
+## 6. Tear The Stack Down
 
 Interactive Cloud Shell convenience path:
 
@@ -130,7 +161,7 @@ Safe planning first:
 
 The wrapper verifies the stack anchors first, then hands teardown off to the existing exact-name destroy engine with its normal confirmation and qualification behavior.
 
-## 6. What Persists If You Return Later
+## 7. What Persists If You Return Later
 
 Default Cloud Shell keeps a persistent `$HOME`, so this repo's convenience file usually survives:
 
@@ -155,7 +186,7 @@ That is why the local file is only convenience state.
 The durable ownership contract remains the GCP labels on the instance/template anchors.
 If the file is missing or stale, run `./bin/openclaw-gcp status --project-id <PROJECT_ID>` so status can recover from labels when safe.
 
-## 7. If Auth Or Project Context Is Missing
+## 8. If Auth Or Project Context Is Missing
 
 For non-Google allowlisted repositories, Cloud Shell can open in a temporary environment without automatic access to the user's default credentials.
 If `status` reports insufficient context, pass `--project-id` or set `gcloud config set project <PROJECT_ID>`.

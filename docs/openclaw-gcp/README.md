@@ -1,6 +1,6 @@
 # OpenClaw On GCP Runbook
 
-This runbook documents the Phase 1 browser-first operator workflow and the thin wrapper that now sits in front of the existing GCP scripts.
+This runbook documents the Phase 3 browser-first day-2 workflow and the thin wrapper that now sits in front of the existing GCP scripts.
 
 ## Primary Quickstart
 
@@ -11,12 +11,15 @@ Inside Cloud Shell, the primary flow is:
 ./bin/openclaw-gcp welcome
 ./bin/openclaw-gcp up --stack-id my-stack
 ./bin/openclaw-gcp status
+./bin/openclaw-gcp ssh
+./bin/openclaw-gcp logs --source readiness
 ./bin/openclaw-gcp down
 ```
 
 `welcome` is non-mutating.
 `up` is the real bring-up action.
 `status` explains both the remembered local stack context and the GCP-backed ownership anchors.
+`ssh` and `logs` use the same stack and anchor verification contract as `status`.
 `down` tears down the same stack contract without making you retype router/template/NAT names manually.
 Phase 1 expects an existing accessible GCP project and does not create new projects for you.
 Set one with `gcloud config set project <PROJECT_ID>` or pass `--project-id <PROJECT_ID>` to `up`.
@@ -113,6 +116,54 @@ Machine-readable mode is also available:
 
 ```bash
 ./bin/openclaw-gcp status --json
+```
+
+`status --json` is additive and mirrors the human summary semantics.
+In addition to the existing top-level fields, it now includes:
+
+- `context`: whether `gcloud` and project context were resolved, plus contextual note text
+- `state`: local convenience file values (`current_stack_id`, last project/region/zone, lifecycle, repaired flag)
+- `recovery`: recovery note plus recovered and partial candidate IDs
+
+This allows automation to reason about recovered, ambiguous, and insufficient-context outcomes directly.
+
+## `ssh`
+
+```bash
+./bin/openclaw-gcp ssh
+```
+
+Behavior:
+- resolves stack identity with the same explicit/current/recovered-single-candidate contract as `status`
+- requires project context and `gcloud`
+- requires a verified labeled instance anchor
+- fails closed when template anchor exists but mismatches labels
+- opens only IAP-backed `gcloud compute ssh`
+
+Explicit stack selection is always available:
+
+```bash
+./bin/openclaw-gcp ssh --stack-id my-stack
+```
+
+## `logs`
+
+```bash
+./bin/openclaw-gcp logs --source readiness
+```
+
+Behavior:
+- uses the same stack resolution and remote-access verification as `ssh`
+- stays on IAP-backed `gcloud compute ssh` path
+- supports only these named sources: `readiness`, `install`, `bootstrap`, `gateway`
+- exits non-zero with explicit messaging for unsupported or unavailable sources
+
+Example sources:
+
+```bash
+./bin/openclaw-gcp logs --source install
+./bin/openclaw-gcp logs --source bootstrap
+./bin/openclaw-gcp logs --source gateway
 ```
 
 ## `down`
