@@ -863,11 +863,17 @@ run_status() {
   local instance_note template_note context_note=""
   local verified_lifecycle=""
   local recovery_state_repaired="false"
+  local gcloud_available="false"
+  local project_context_resolved="false"
+  local cloud_shell="false"
 
   parse_common_args "$@"
   resolved_project="$(resolve_project_context)"
   resolved_region="$(resolve_region_context)"
   resolved_zone="$(resolve_zone_context "${resolved_region}")"
+  command_exists gcloud && gcloud_available="true"
+  [[ -n "${resolved_project}" ]] && project_context_resolved="true"
+  oc_stack_is_cloud_shell && cloud_shell="true"
 
   state_stack_id="$(oc_stack_state_get_or_empty CURRENT_STACK_ID)"
   state_project_id="$(oc_stack_state_get_or_empty LAST_PROJECT_ID)"
@@ -944,7 +950,7 @@ run_status() {
 
   if [[ "${STATUS_JSON}" == "true" ]]; then
     cat <<EOF
-{"stack_id":"${STACK_ID}","selection_source":"${SELECTION_SOURCE}","lifecycle":"${LIFECYCLE}","project_id":"${resolved_project}","region":"${resolved_region}","zone":"${resolved_zone}","instance":{"name":"${instance_name}","status":"${instance_status}","note":"${instance_note:-}"},"template":{"name":"${template_name}","status":"${template_status}","note":"${template_note:-}"},"router":{"name":"${router_name}","status":"${router_status}"},"nat":{"name":"${nat_name}","status":"${nat_status}"},"state_file":"$(oc_stack_state_file)","current_stack_id":"${state_stack_id}","state_repaired":"${recovery_state_repaired}"}
+{"stack_id":"${STACK_ID}","selection_source":"${SELECTION_SOURCE}","lifecycle":"${LIFECYCLE}","project_id":"${resolved_project}","region":"${resolved_region}","zone":"${resolved_zone}","instance":{"name":"${instance_name}","status":"${instance_status}","note":"${instance_note:-}"},"template":{"name":"${template_name}","status":"${template_status}","note":"${template_note:-}"},"router":{"name":"${router_name}","status":"${router_status}"},"nat":{"name":"${nat_name}","status":"${nat_status}"},"state_file":"$(oc_stack_state_file)","current_stack_id":"${state_stack_id}","state_repaired":"${recovery_state_repaired}","context":{"gcloud_available":${gcloud_available},"project_context_resolved":${project_context_resolved},"cloud_shell":${cloud_shell},"note":"${context_note:-}"},"state":{"file":"$(oc_stack_state_file)","current_stack_id":"${state_stack_id:-}","last_project_id":"${state_project_id:-}","last_region":"${state_region:-}","last_zone":"${state_zone:-}","lifecycle":"${state_lifecycle:-}","repaired":"${recovery_state_repaired}"},"recovery":{"note":"${RECOVERY_NOTE:-}","recovered_candidates":"${RECOVERY_CANDIDATES_CSV:-}","partial_anchor_ids":"${RECOVERY_PARTIALS_CSV:-}"}}
 EOF
     return 0
   fi
