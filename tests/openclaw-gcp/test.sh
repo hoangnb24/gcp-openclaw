@@ -28,6 +28,13 @@ run_capture() {
   set -e
 }
 
+run_capture_with_tty() {
+  set +e
+  RUN_OUTPUT="$(script -q /dev/null "$@" 2>&1)"
+  RUN_STATUS=$?
+  set -e
+}
+
 assert_status() {
   local expected="$1"
   local message="$2"
@@ -111,6 +118,33 @@ metadata_default_value() {
     openclaw_tag) printf '%s\n' "${MOCK_OPENCLAW_TAG:-2026.3.23}" ;;
     legacy_openclaw_image) printf '%s\n' "${MOCK_LEGACY_OPENCLAW_IMAGE:-}" ;;
     legacy_openclaw_tag) printf '%s\n' "${MOCK_LEGACY_OPENCLAW_TAG:-}" ;;
+    *) printf '%s\n' "" ;;
+  esac
+}
+
+derive_stack_id_from_resource_name() {
+  local resource_name="$1"
+  case "${resource_name}" in
+    oc-*-template)
+      printf '%s\n' "${resource_name#oc-}" | sed 's/-template$//'
+      ;;
+    oc-*)
+      printf '%s\n' "${resource_name#oc-}"
+      ;;
+    *)
+      printf '%s\n' "${MOCK_STACK_ID_DEFAULT:-unknown-stack}"
+      ;;
+  esac
+}
+
+label_default_value() {
+  local resource_name="$1"
+  local key="$2"
+  case "${key}" in
+    openclaw_managed) printf '%s\n' "true" ;;
+    openclaw_stack_id) derive_stack_id_from_resource_name "${resource_name}" ;;
+    openclaw_tool) printf '%s\n' "openclaw-gcp" ;;
+    openclaw_lifecycle) printf '%s\n' "${MOCK_LABEL_LIFECYCLE:-persistent}" ;;
     *) printf '%s\n' "" ;;
   esac
 }
@@ -241,6 +275,30 @@ if [[ "$*" == *"compute instances list"* && "$*" == *"--format=value(zone.basena
   exit 0
 fi
 
+if [[ "$*" == *"compute instances list"* && "$*" == *"--format=value(labels.openclaw_stack_id)"* ]]; then
+  if [[ -n "${MOCK_RECOVERY_INSTANCE_STACK_IDS:-}" ]]; then
+    printf '%b\n' "${MOCK_RECOVERY_INSTANCE_STACK_IDS}"
+    exit 0
+  fi
+  if [[ "${MOCK_INSTANCE_EXISTS:-false}" == "true" ]]; then
+    printf '%s\n' "$(derive_stack_id_from_resource_name "${MOCK_INSTANCE_NAME:-oc-main}")"
+    exit 0
+  fi
+  exit 0
+fi
+
+if [[ "$*" == *"compute instance-templates list"* && "$*" == *"--format=value(labels.openclaw_stack_id)"* ]]; then
+  if [[ -n "${MOCK_RECOVERY_TEMPLATE_STACK_IDS:-}" ]]; then
+    printf '%b\n' "${MOCK_RECOVERY_TEMPLATE_STACK_IDS}"
+    exit 0
+  fi
+  if [[ "${MOCK_TEMPLATE_EXISTS:-false}" == "true" ]]; then
+    printf '%s\n' "$(derive_stack_id_from_resource_name "${MOCK_TEMPLATE_NAME:-oc-template}")"
+    exit 0
+  fi
+  exit 0
+fi
+
 if [[ "$*" == *"compute images describe"* && "$*" == *"--format=value(name)"* ]]; then
   for arg in "$@"; do
     if [[ "${arg}" != --* && "${arg}" != "compute" && "${arg}" != "images" && "${arg}" != "describe" ]]; then
@@ -263,6 +321,25 @@ if [[ "$*" == *"compute images describe"* && "$*" == *"--format=value(selfLink)"
 fi
 
 if [[ "$*" == *"compute instance-templates describe"* ]]; then
+  template_name=""
+  for ((i=1; i <= $#; i++)); do
+    if [[ "${!i}" == "describe" ]]; then
+      next=$((i + 1))
+      template_name="${!next}"
+      break
+    fi
+  done
+  if [[ "$*" == *"--format=value(labels.openclaw_managed,labels.openclaw_stack_id,labels.openclaw_tool,labels.openclaw_lifecycle)"* ]]; then
+    if [[ "${MOCK_TEMPLATE_EXISTS:-false}" == "true" ]]; then
+      printf '%s\t%s\t%s\t%s\n' \
+        "${MOCK_TEMPLATE_LABEL_OPENCLAW_MANAGED:-$(label_default_value "${template_name}" openclaw_managed)}" \
+        "${MOCK_TEMPLATE_LABEL_OPENCLAW_STACK_ID:-$(label_default_value "${template_name}" openclaw_stack_id)}" \
+        "${MOCK_TEMPLATE_LABEL_OPENCLAW_TOOL:-$(label_default_value "${template_name}" openclaw_tool)}" \
+        "${MOCK_TEMPLATE_LABEL_OPENCLAW_LIFECYCLE:-$(label_default_value "${template_name}" openclaw_lifecycle)}"
+      exit 0
+    fi
+    exit 1
+  fi
   if [[ "$*" == *"--flatten=properties.metadata.items[]"* && "$*" == *"--format=value(properties.metadata.items.key,properties.metadata.items.value)"* ]]; then
     if [[ "${MOCK_DESTROY_TEMPLATE_DESCRIBE_FAIL:-false}" == "true" ]]; then
       exit 1
@@ -285,7 +362,7 @@ if [[ "$*" == *"compute instance-templates describe"* ]]; then
     exit 0
   fi
   if [[ "${MOCK_TEMPLATE_EXISTS:-false}" == "true" ]]; then
-    printf '%s\n' "${MOCK_TEMPLATE_NAME:-oc-template}"
+    printf '%s\n' "${template_name:-${MOCK_TEMPLATE_NAME:-oc-template}}"
     exit 0
   fi
   exit 1
@@ -301,6 +378,26 @@ if [[ "$*" == *"compute instances describe"* && "$*" == *"--format=value(name)"*
       fi
     done
     printf '%s\n' "${MOCK_INSTANCE_NAME:-oc-main}"
+    exit 0
+  fi
+  exit 1
+fi
+
+if [[ "$*" == *"compute instances describe"* && "$*" == *"--format=value(labels.openclaw_managed,labels.openclaw_stack_id,labels.openclaw_tool,labels.openclaw_lifecycle)"* ]]; then
+  instance_name=""
+  for ((i=1; i <= $#; i++)); do
+    if [[ "${!i}" == "describe" ]]; then
+      next=$((i + 1))
+      instance_name="${!next}"
+      break
+    fi
+  done
+  if [[ "${MOCK_INSTANCE_EXISTS:-false}" == "true" ]]; then
+    printf '%s\t%s\t%s\t%s\n' \
+      "${MOCK_INSTANCE_LABEL_OPENCLAW_MANAGED:-$(label_default_value "${instance_name}" openclaw_managed)}" \
+      "${MOCK_INSTANCE_LABEL_OPENCLAW_STACK_ID:-$(label_default_value "${instance_name}" openclaw_stack_id)}" \
+      "${MOCK_INSTANCE_LABEL_OPENCLAW_TOOL:-$(label_default_value "${instance_name}" openclaw_tool)}" \
+      "${MOCK_INSTANCE_LABEL_OPENCLAW_LIFECYCLE:-$(label_default_value "${instance_name}" openclaw_lifecycle)}"
     exit 0
   fi
   exit 1
@@ -635,7 +732,16 @@ test_snapshot_policy_reuse_and_region_default_zone() {
 }
 
 test_docs_smoke_commands() {
+  local readme_content quickstart_content
   TESTS_RUN=$((TESTS_RUN + 1))
+
+  readme_content="$(cat "${ROOT_DIR}/README.md")"
+  quickstart_content="$(cat "${ROOT_DIR}/docs/openclaw-gcp/cloud-shell-quickstart.md")"
+  assert_contains "${readme_content}" "cloudshell_git_branch=main" "README Cloud Shell button pins the production main branch explicitly"
+  assert_contains "${readme_content}" "cloudshell_workspace=." "README Cloud Shell button opens the cloned repo root explicitly"
+  assert_contains "${quickstart_content}" "cloudshell_git_branch=main" "Cloud Shell quickstart documents the production branch pin"
+  assert_contains "${quickstart_content}" "cloudshell_workspace=." "Cloud Shell quickstart documents the repo-root workspace path"
+  assert_contains "${quickstart_content}" "--open_workspace \".\"" "Cloud Shell quickstart documents the repo-root workspace flag for cloudshell_open UAT"
 
   run_capture bash "${ROOT_DIR}/scripts/openclaw-gcp/create-template.sh" \
     --project-id hoangnb-openclaw \
@@ -722,6 +828,385 @@ test_docs_smoke_commands() {
     --run-now \
     --dry-run
   assert_status 0 "repair-instance-bootstrap example parses in dry-run mode"
+
+  run_capture bash "${ROOT_DIR}/bin/openclaw-gcp" welcome --stack-id team-dev --non-interactive
+  assert_status 0 "Cloud Shell welcome entrypoint parses in non-interactive mode"
+  assert_contains "${RUN_OUTPUT}" "./bin/openclaw-gcp up --stack-id team-dev" "welcome entrypoint points to the stack-native up command"
+  assert_contains "${RUN_OUTPUT}" "This flow expects an existing accessible GCP project." "welcome entrypoint explains the project-scope boundary"
+  assert_contains "${RUN_OUTPUT}" "gcloud config set project <PROJECT_ID>" "welcome entrypoint shows how to select an existing project"
+}
+
+test_stack_wrapper_up_status_down_contract() {
+  local mock_dir home_dir state_file log_content
+  mock_dir="$(new_mock_env stack-wrapper)"
+  home_dir="${mock_dir}/home"
+  mkdir -p "${home_dir}"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    MOCK_ROUTER_EXISTS=true \
+    MOCK_NAT_EXISTS=true \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" up \
+    --stack-id team-dev \
+    --project-id hoangnb-openclaw \
+    --openclaw-tag v1.2.3 \
+    --non-interactive \
+    --dry-run
+
+  assert_status 0 "wrapper up dry-run resolves stack names and delegates safely"
+  assert_contains "${RUN_OUTPUT}" "instance_name=oc-team-dev" "wrapper up derives the instance name from stack ID"
+  assert_contains "${RUN_OUTPUT}" "template_name=oc-team-dev-template" "wrapper up derives the template name from stack ID"
+  assert_contains "${RUN_OUTPUT}" "router_name=oc-team-dev-router" "wrapper up derives the router name from stack ID"
+  assert_contains "${RUN_OUTPUT}" "nat_name=oc-team-dev-nat" "wrapper up derives the NAT name from stack ID"
+  assert_contains "${RUN_OUTPUT}" "labels=openclaw_managed=true,openclaw_stack_id=team-dev,openclaw_tool=openclaw-gcp,openclaw_lifecycle=persistent" "wrapper up emits the stack label contract"
+  assert_contains "${RUN_OUTPUT}" "Dry-run mode: skipping current-stack state write." "wrapper up keeps dry-run mutation-free"
+
+  state_file="${home_dir}/.config/openclaw-gcp/current-stack.env"
+  if [[ -f "${state_file}" ]]; then
+    fail "wrapper up dry-run should not write local state"
+    cat "${state_file}"
+  else
+    pass "wrapper up dry-run leaves local state untouched"
+  fi
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    MOCK_ROUTER_EXISTS=true \
+    MOCK_NAT_EXISTS=true \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" status \
+    --stack-id team-dev \
+    --project-id hoangnb-openclaw
+
+  assert_status 0 "wrapper status shows live stack summary"
+  assert_contains "${RUN_OUTPUT}" "instance (oc-team-dev): present (labels verified)" "wrapper status verifies instance labels against stack ID"
+  assert_contains "${RUN_OUTPUT}" "template (oc-team-dev-template): present (labels verified)" "wrapper status verifies template labels against stack ID"
+  assert_contains "${RUN_OUTPUT}" "router (oc-team-dev-router): present" "wrapper status reports router presence"
+  assert_contains "${RUN_OUTPUT}" "nat (oc-team-dev-nat): present" "wrapper status reports NAT presence"
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" down \
+    --stack-id team-dev \
+    --project-id hoangnb-openclaw \
+    --dry-run
+
+  assert_status 0 "wrapper down dry-run verifies anchors then delegates to destroy"
+  assert_contains "${RUN_OUTPUT}" "[down] Stack anchors verified through GCP labels." "wrapper down reports label-backed verification before destroy"
+  assert_contains "${RUN_OUTPUT}" "gcloud compute instances delete oc-team-dev" "wrapper down dry-run passes the derived instance name to destroy"
+  assert_contains "${RUN_OUTPUT}" "gcloud compute instance-templates delete oc-team-dev-template" "wrapper down dry-run passes the derived template name to destroy"
+  assert_contains "${RUN_OUTPUT}" "gcloud compute routers nats delete oc-team-dev-nat" "wrapper down dry-run passes the derived NAT name to destroy"
+  assert_contains "${RUN_OUTPUT}" "gcloud compute routers delete oc-team-dev-router" "wrapper down dry-run passes the derived router name to destroy"
+
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_contains "${log_content}" "GCLOUD compute instances describe oc-team-dev --project hoangnb-openclaw --zone asia-southeast1-a --format=value(labels.openclaw_managed,labels.openclaw_stack_id,labels.openclaw_tool,labels.openclaw_lifecycle)" "wrapper down checks instance labels before teardown"
+  assert_contains "${log_content}" "GCLOUD compute instance-templates describe oc-team-dev-template --project hoangnb-openclaw --region asia-southeast1 --format=value(labels.openclaw_managed,labels.openclaw_stack_id,labels.openclaw_tool,labels.openclaw_lifecycle)" "wrapper down checks template labels before teardown"
+}
+
+test_stack_wrapper_state_persists_when_up_fails() {
+  local mock_dir home_dir state_file state_content
+  mock_dir="$(new_mock_env stack-wrapper-state)"
+  home_dir="${mock_dir}/home"
+  mkdir -p "${home_dir}"
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_SSH_FAIL_HANDOFF=true \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" up \
+    --stack-id team-dev \
+    --project-id hoangnb-openclaw \
+    --openclaw-tag v1.2.3 \
+    --non-interactive
+
+  assert_status 1 "wrapper up still leaves convenience state behind when the install handoff fails"
+  assert_contains "${RUN_OUTPUT}" "Saved current stack convenience state to" "wrapper up writes state before the delegated install finishes"
+  assert_contains "${RUN_OUTPUT}" "Install handoff failed:" "wrapper up still surfaces delegated install failure"
+
+  state_file="${home_dir}/.config/openclaw-gcp/current-stack.env"
+  if [[ -f "${state_file}" ]]; then
+    pass "wrapper up failure leaves a current-stack file for later status/down"
+  else
+    fail "wrapper up failure should still leave a current-stack file"
+  fi
+  state_content="$(cat "${state_file}")"
+  assert_contains "${state_content}" "CURRENT_STACK_ID=team-dev" "current-stack file records stack ID after failed up"
+  assert_contains "${state_content}" "LAST_PROJECT_ID=hoangnb-openclaw" "current-stack file records project context after failed up"
+  assert_contains "${state_content}" "LAST_REGION=asia-southeast1" "current-stack file records region context after failed up"
+  assert_contains "${state_content}" "LAST_ZONE=asia-southeast1-a" "current-stack file records zone context after failed up"
+}
+
+test_stack_wrapper_down_safety_guards() {
+  local mock_dir home_dir state_file state_content
+  mock_dir="$(new_mock_env stack-wrapper-down-safety)"
+  home_dir="${mock_dir}/home"
+  mkdir -p "${home_dir}/.config/openclaw-gcp"
+  state_file="${home_dir}/.config/openclaw-gcp/current-stack.env"
+  cat >"${state_file}" <<'EOF'
+# openclaw-gcp local convenience state
+CURRENT_STACK_ID=team-dev
+LAST_PROJECT_ID=hoangnb-openclaw
+LAST_REGION=asia-southeast1
+LAST_ZONE=asia-southeast1-a
+LIFECYCLE=persistent
+EOF
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    CLOUD_SHELL=true \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" down --dry-run
+
+  assert_status 1 "wrapper down requires an explicit stack outside interactive Cloud Shell even when current state exists"
+  assert_contains "${RUN_OUTPUT}" "down requires --stack-id outside interactive Cloud Shell sessions" "wrapper down explains the non-interactive explicit-stack requirement"
+  if [[ -f "${mock_dir}/gcloud.log" ]] && [[ -s "${mock_dir}/gcloud.log" ]]; then
+    fail "wrapper down non-interactive refusal should happen before gcloud lookups"
+    cat "${mock_dir}/gcloud.log"
+  else
+    pass "wrapper down non-interactive refusal happens before any remote target lookup"
+  fi
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    GOOGLE_CLOUD_PROJECT=staging-project \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" down \
+    --stack-id team-dev \
+    --dry-run
+
+  assert_status 0 "wrapper down prefers live project context over remembered project state"
+  assert_contains "${RUN_OUTPUT}" "project_id=staging-project" "wrapper down reports the live project context when state is stale"
+
+  local log_content
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_contains "${log_content}" "--project staging-project" "wrapper down verifies anchors against the live project context instead of remembered state"
+
+  run_capture_with_tty env \
+    HOME="${home_dir}" \
+    PATH="${mock_dir}/bin:${PATH}" \
+    MOCK_GCLOUD_LOG="${mock_dir}/gcloud.log" \
+    CLOUD_SHELL=true \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" down --dry-run
+
+  assert_status 0 "wrapper down allows remembered current stack in interactive Cloud Shell sessions"
+  assert_contains "${RUN_OUTPUT}" "selection_source=current-state" "wrapper down reports current-state selection in interactive Cloud Shell"
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_INSTANCE_LABEL_OPENCLAW_STACK_ID=other-stack \
+    MOCK_TEMPLATE_EXISTS=true \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" down \
+    --stack-id team-dev \
+    --project-id hoangnb-openclaw \
+    --dry-run
+
+  assert_status 1 "wrapper down fails closed when a labeled anchor does not match the requested stack"
+  assert_contains "${RUN_OUTPUT}" "label mismatch" "wrapper down reports label mismatch before destroy"
+  assert_contains "${RUN_OUTPUT}" "Refusing teardown because the labeled GCP anchors do not match." "wrapper down preserves stack-identity safety"
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" down \
+    --stack-id team-dev \
+    --project-id hoangnb-openclaw \
+    --yes \
+    --non-interactive
+
+  assert_status 0 "wrapper down succeeds non-interactively when stack is explicit and anchors verify"
+  assert_contains "${RUN_OUTPUT}" "Destroy completed successfully." "wrapper down surfaces successful delegated destroy completion"
+  assert_contains "${RUN_OUTPUT}" "Cleared current stack pointer in" "wrapper down clears remembered current stack after success"
+
+  state_content="$(cat "${state_file}")"
+  assert_contains "${state_content}" "CURRENT_STACK_ID=" "wrapper down clears the current stack pointer after success"
+}
+
+test_stack_wrapper_recovery_contract() {
+  local mock_dir home_dir state_file state_content
+  mock_dir="$(new_mock_env stack-wrapper-recovery)"
+  home_dir="${mock_dir}/home"
+  mkdir -p "${home_dir}"
+  TESTS_RUN=$((TESTS_RUN + 1))
+  state_file="${home_dir}/.config/openclaw-gcp/current-stack.env"
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    MOCK_RECOVERY_INSTANCE_STACK_IDS="team-dev" \
+    MOCK_RECOVERY_TEMPLATE_STACK_IDS="team-dev" \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" status \
+    --project-id hoangnb-openclaw
+
+  assert_status 0 "wrapper status recovers one stack when current-state is missing"
+  assert_contains "${RUN_OUTPUT}" "selection_source: recovered-single-candidate" "wrapper status reports recovered-single-candidate selection source"
+  assert_contains "${RUN_OUTPUT}" "state_repaired: true" "wrapper status reports that local state was repaired"
+  if [[ -f "${state_file}" ]]; then
+    pass "wrapper status writes local state after exact-one recovery"
+  else
+    fail "wrapper status should write local state after exact-one recovery"
+  fi
+  state_content="$(cat "${state_file}")"
+  assert_contains "${state_content}" "CURRENT_STACK_ID=team-dev" "recovered state stores the recovered stack ID"
+
+  cat >"${state_file}" <<'EOF'
+# openclaw-gcp local convenience state
+CURRENT_STACK_ID=old-stack
+LAST_PROJECT_ID=hoangnb-openclaw
+LAST_REGION=asia-southeast1
+LAST_ZONE=asia-southeast1-a
+LIFECYCLE=persistent
+EOF
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    MOCK_RECOVERY_INSTANCE_STACK_IDS="team-dev" \
+    MOCK_RECOVERY_TEMPLATE_STACK_IDS="team-dev" \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" status \
+    --project-id hoangnb-openclaw
+
+  assert_status 0 "wrapper status treats stale current-state as recoverable convenience data"
+  assert_contains "${RUN_OUTPUT}" "current state 'old-stack' appears stale; status recovered 'team-dev' from labels." "wrapper status explains stale-state recovery"
+  state_content="$(cat "${state_file}")"
+  assert_contains "${state_content}" "CURRENT_STACK_ID=team-dev" "stale state is repaired to the recovered stack ID"
+
+  rm -f "${state_file}"
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_RECOVERY_INSTANCE_STACK_IDS=$'team-dev\nteam-prod' \
+    MOCK_RECOVERY_TEMPLATE_STACK_IDS=$'team-dev\nteam-prod' \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" status \
+    --project-id hoangnb-openclaw
+
+  assert_status 1 "wrapper status fails closed when multiple recovery candidates exist"
+  assert_contains "${RUN_OUTPUT}" "status recovery is ambiguous" "wrapper status reports ambiguous recovery candidates"
+  assert_contains "${RUN_OUTPUT}" "Pass --stack-id explicitly." "wrapper status requires explicit stack selection on ambiguity"
+  if [[ -f "${state_file}" ]]; then
+    fail "ambiguous recovery should not write local state"
+    cat "${state_file}"
+  else
+    pass "ambiguous recovery leaves local state untouched"
+  fi
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    CLOUD_SHELL=true \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" down \
+    --project-id hoangnb-openclaw \
+    --dry-run
+
+  assert_status 1 "wrapper down still refuses to guess after ambiguous recovery"
+  assert_contains "${RUN_OUTPUT}" "down requires --stack-id outside interactive Cloud Shell sessions" "wrapper down keeps explicit stack requirement when no repaired current state exists"
+
+  run_capture bash -c "env PATH=\"/usr/bin:/bin\" HOME=\"${home_dir}\" bash \"${ROOT_DIR}/bin/openclaw-gcp\" status --project-id hoangnb-openclaw"
+  assert_status 1 "wrapper status reports insufficient context when gcloud is unavailable"
+  assert_contains "${RUN_OUTPUT}" "status has insufficient context" "wrapper status emits the insufficient-context guidance"
+}
+
+test_stack_wrapper_day2_contract() {
+  local mock_dir home_dir state_file log_content unsupported_mock_dir
+  mock_dir="$(new_mock_env stack-wrapper-day2)"
+  home_dir="${mock_dir}/home"
+  mkdir -p "${home_dir}/.config/openclaw-gcp"
+  state_file="${home_dir}/.config/openclaw-gcp/current-stack.env"
+  cat >"${state_file}" <<'EOF'
+# openclaw-gcp local convenience state
+CURRENT_STACK_ID=team-dev
+LAST_PROJECT_ID=hoangnb-openclaw
+LAST_REGION=asia-southeast1
+LAST_ZONE=asia-southeast1-a
+LIFECYCLE=persistent
+EOF
+  TESTS_RUN=$((TESTS_RUN + 1))
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" ssh \
+    --stack-id team-dev \
+    --project-id hoangnb-openclaw
+
+  assert_status 0 "wrapper ssh uses verified stack contract"
+  assert_contains "${RUN_OUTPUT}" "[ssh] Stack anchors verified through GCP labels." "wrapper ssh reports verified stack anchors"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_contains "${log_content}" "GCLOUD compute ssh oc-team-dev --project hoangnb-openclaw --zone asia-southeast1-a --tunnel-through-iap" "wrapper ssh stays on IAP-backed gcloud compute ssh"
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" logs \
+    --stack-id team-dev \
+    --project-id hoangnb-openclaw \
+    --source readiness
+
+  assert_status 0 "wrapper logs supports named readiness source"
+  assert_contains "${RUN_OUTPUT}" "[logs] Stack anchors verified through GCP labels." "wrapper logs verifies anchors before remote access"
+  assert_contains "${RUN_OUTPUT}" "source=readiness" "wrapper logs reports selected source"
+  log_content="$(cat "${mock_dir}/gcloud.log")"
+  assert_contains "${log_content}" "readiness-gate.log" "wrapper logs uses readiness source contract"
+
+  unsupported_mock_dir="$(new_mock_env stack-wrapper-day2-unsupported)"
+  run_capture run_with_mock "${unsupported_mock_dir}" \
+    HOME="${home_dir}" \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" logs \
+    --stack-id team-dev \
+    --project-id hoangnb-openclaw \
+    --source unsupported
+
+  assert_status 1 "wrapper logs rejects unsupported named source"
+  assert_contains "${RUN_OUTPUT}" "unsupported logs source 'unsupported'" "wrapper logs reports supported source constraint"
+  if [[ -f "${unsupported_mock_dir}/gcloud.log" ]] && [[ -s "${unsupported_mock_dir}/gcloud.log" ]]; then
+    fail "wrapper logs unsupported source should fail before any gcloud call"
+    cat "${unsupported_mock_dir}/gcloud.log"
+  else
+    pass "wrapper logs unsupported source fails before remote execution"
+  fi
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    MOCK_TEMPLATE_LABEL_OPENCLAW_STACK_ID=other-stack \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" ssh \
+    --stack-id team-dev \
+    --project-id hoangnb-openclaw
+
+  assert_status 1 "wrapper ssh fails closed on template label mismatch"
+  assert_contains "${RUN_OUTPUT}" "Refusing SSH because stack anchors are not trustworthy." "wrapper ssh preserves fail-closed anchor contract"
+
+  run_capture run_with_mock "${mock_dir}" \
+    HOME="${home_dir}" \
+    MOCK_INSTANCE_EXISTS=true \
+    MOCK_TEMPLATE_EXISTS=true \
+    bash "${ROOT_DIR}/bin/openclaw-gcp" status \
+    --stack-id team-dev \
+    --project-id hoangnb-openclaw \
+    --json
+
+  assert_status 0 "wrapper status --json remains available for automation"
+  assert_contains "${RUN_OUTPUT}" "\"context\":{\"gcloud_available\":true" "wrapper status --json includes context section"
+  assert_contains "${RUN_OUTPUT}" "\"state\":{\"file\":\"" "wrapper status --json includes state section"
+  assert_contains "${RUN_OUTPUT}" "\"recovery\":{\"note\":\"" "wrapper status --json includes recovery section"
+  assert_contains "${RUN_OUTPUT}" "\"selection_source\":\"explicit\"" "wrapper status --json preserves selection source semantics"
 }
 
 test_install_help_and_noninteractive_gcloud_guard() {
@@ -927,7 +1412,12 @@ test_install_ssh_handoff_contract_and_failure_summary() {
   assert_status 0 "install.sh dry-run prints interactive SSH handoff command contract"
   assert_contains "${RUN_OUTPUT}" "Dry-run command (interactive SSH handoff):" "install.sh dry-run prints handoff command"
   assert_contains "${RUN_OUTPUT}" "--tunnel-through-iap" "install.sh handoff command preserves IAP SSH posture"
-  assert_contains "${RUN_OUTPUT}" "curl -fsSL https://openclaw.ai/install.sh | bash" "install.sh handoff command includes upstream installer"
+  assert_contains "${RUN_OUTPUT}" "Handoff installer source: https://openclaw.ai/install.sh" "install.sh reports the pinned installer source"
+  assert_contains "${RUN_OUTPUT}" "Handoff installer sha256: 3b8aa27c0c9aa34c4b401d669287c22de9c03f6cdcb94fbc16a73c285307e788" "install.sh reports the pinned installer digest"
+  assert_contains "${RUN_OUTPUT}" "INSTALLER_SHA256=\\\"3b8aa27c0c9aa34c4b401d669287c22de9c03f6cdcb94fbc16a73c285307e788\\\"" "install.sh dry-run embeds the installer verification contract"
+  assert_contains "${RUN_OUTPUT}" "download_installer" "install.sh dry-run includes the remote download helper"
+  assert_contains "${RUN_OUTPUT}" "sha256_of_file" "install.sh dry-run includes the remote SHA-256 verification helper"
+  assert_not_contains "${RUN_OUTPUT}" "curl -fsSL https://openclaw.ai/install.sh | bash" "install.sh dry-run no longer executes curl pipe bash directly"
   assert_contains "${RUN_OUTPUT}" "umask\\ 077" "install.sh handoff command hardens transcript umask"
   assert_contains "${RUN_OUTPUT}" "mkdir\\ -m\\ 700\\ -p" "install.sh handoff command creates transcript directory with private permissions"
   assert_contains "${RUN_OUTPUT}" "chmod\\ 600\\ " "install.sh handoff command hardens transcript file permissions"
@@ -1354,6 +1844,11 @@ main() {
   test_template_reuse_rejects_explicit_drift_inputs
   test_snapshot_policy_reuse_and_region_default_zone
   test_docs_smoke_commands
+  test_stack_wrapper_up_status_down_contract
+  test_stack_wrapper_state_persists_when_up_fails
+  test_stack_wrapper_down_safety_guards
+  test_stack_wrapper_recovery_contract
+  test_stack_wrapper_day2_contract
   test_install_help_and_noninteractive_gcloud_guard
   test_install_parser_missing_value_guard
   test_install_prompt_and_nonprompt_behavior

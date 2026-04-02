@@ -24,6 +24,7 @@ STARTUP_SCRIPT_MODE="embedded"
 STARTUP_PROFILE="vm-prereqs-v1"
 STARTUP_CONTRACT_VERSION="startup-ready-v1"
 STARTUP_READY_SENTINEL="/var/lib/openclaw/startup-ready-v1"
+RESOURCE_LABELS=""
 SERVICE_ACCOUNT=""
 SCOPES=""
 NO_SERVICE_ACCOUNT="false"
@@ -65,6 +66,7 @@ Options:
   --startup-script-file <path>  Local startup script source
   --startup-script-url <url>    Remote startup script source
   --startup-script-sha256 <hex> Required SHA-256 when using --startup-script-url
+  --resource-labels <csv>       Labels to apply to the template resource
   --service-account <email>     Service account to attach to the template
   --scopes <csv>                OAuth scopes for the service account
   --no-service-account          Create the template without any attached service account
@@ -181,6 +183,7 @@ while [[ $# -gt 0 ]]; do
     --startup-script-file) STARTUP_SCRIPT_FILE="${2:-}"; record_explicit_template_input "--startup-script-file"; shift 2 ;;
     --startup-script-url) STARTUP_SCRIPT_URL="${2:-}"; record_explicit_template_input "--startup-script-url"; shift 2 ;;
     --startup-script-sha256) STARTUP_SCRIPT_SHA256="${2:-}"; record_explicit_template_input "--startup-script-sha256"; shift 2 ;;
+    --resource-labels) RESOURCE_LABELS="${2:-}"; record_explicit_template_input "--resource-labels"; shift 2 ;;
     --service-account) SERVICE_ACCOUNT="${2:-}"; record_explicit_template_input "--service-account"; shift 2 ;;
     --scopes) SCOPES="${2:-}"; record_explicit_template_input "--scopes"; shift 2 ;;
     --no-service-account) NO_SERVICE_ACCOUNT="true"; record_explicit_template_input "--no-service-account"; shift ;;
@@ -349,6 +352,9 @@ if [[ "${NO_SERVICE_ACCOUNT}" == "true" ]]; then
 else
   CMD+=(--service-account "${SERVICE_ACCOUNT}" --scopes "${SCOPES}")
 fi
+if [[ -n "${RESOURCE_LABELS}" ]]; then
+  CMD+=(--labels "${RESOURCE_LABELS}")
+fi
 if [[ "${NO_ADDRESS}" == "true" ]]; then
   CMD+=(--no-address)
 fi
@@ -367,6 +373,7 @@ echo "  startup_contract_version: ${STARTUP_CONTRACT_VERSION}"
 echo "  startup_ready_sentinel: ${STARTUP_READY_SENTINEL}"
 echo "  openclaw_image: ${OPENCLAW_IMAGE}"
 echo "  openclaw_tag: ${OPENCLAW_TAG}"
+echo "  resource_labels: ${RESOURCE_LABELS:-<none>}"
 echo "  identity_mode: $([[ "${NO_SERVICE_ACCOUNT}" == "true" ]] && echo "no-service-account" || echo "service-account")"
 echo "  external_ipv4: $([[ "${NO_ADDRESS}" == "true" ]] && echo "disabled" || echo "ephemeral-default")"
 if [[ -n "${SERVICE_ACCOUNT}" ]]; then

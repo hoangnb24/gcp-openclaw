@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "feature_slug": "openclaw-gcp-cloud-shell-first",
+  "mode": "compounding",
+  "active_skill": "compounding",
+  "phase": "compounding",
+  "phase_number": 3,
+  "epic_id": "br-ioc",
+  "approved_gates": {
+    "context": true,
+    "phase_plan": true,
+    "execution": true,
+    "review": true
+  },
+  "active_beads": [],
+  "active_workers": [],
+  "blockers": [],
+  "last_updated": "2026-04-02T04:43:50Z"
+}

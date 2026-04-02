@@ -1,0 +1,1259 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${BIN_DIR}/.." && pwd)"
+STACK_LIB="${REPO_ROOT}/scripts/openclaw-gcp/lib-stack.sh"
+WELCOME_SCRIPT="${REPO_ROOT}/scripts/openclaw-gcp/cloudshell-welcome.sh"
+INSTALL_SCRIPT="${REPO_ROOT}/scripts/openclaw-gcp/install.sh"
+DESTROY_SCRIPT="${REPO_ROOT}/scripts/openclaw-gcp/destroy.sh"
+
+[[ -f "${STACK_LIB}" ]] || {
+  echo "Error: missing stack helper library at ${STACK_LIB}" >&2
+  exit 1
+}
+# shellcheck source=/dev/null
+source "${STACK_LIB}"
+
+COMMAND=""
+STACK_ID=""
+LIFECYCLE="${OPENCLAW_STACK_DEFAULT_LIFECYCLE}"
+PROJECT_ID=""
+REGION=""
+ZONE=""
+NETWORK="default"
+STATUS_JSON="false"
+SELECTION_SOURCE="explicit"
+UP_DRY_RUN="false"
+DOWN_DRY_RUN="false"
+DOWN_ASSUME_YES="false"
+DOWN_FORCE_INTERACTIVE="false"
+DOWN_FORCE_NON_INTERACTIVE="false"
+INSTALL_PASSTHROUGH_ARGS=()
+DESTROY_PASSTHROUGH_ARGS=()
+SSH_PASSTHROUGH_ARGS=()
+LOG_SOURCE=""
+RESOLVED_STACK_ID=""
+RECOVERY_NOTE=""
+RECOVERY_CANDIDATES_CSV=""
+RECOVERY_PARTIALS_CSV=""
+RECOVERY_CANDIDATES_NL=""
+RECOVERY_PARTIALS_NL=""
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") <command> [options]
+
+Phase 1 command surface for OpenClaw on GCP.
+
+Commands:
+  welcome   Run the non-mutating Cloud Shell welcome flow
+  up        Bring up one named stack through the existing install engine
+  status    Show the current or explicit stack with GCP-backed anchor checks
+  ssh       Open an IAP-backed shell on the verified stack instance
+  logs      Fetch named remote logs through the verified stack access path
+  down      Tear down one stack through the existing destroy engine
+  help      Show this help text
+
+Start here in Cloud Shell:
+  1. Open the repo with the Open in Cloud Shell button in README.md
+  2. Run: bin/openclaw-gcp welcome
+  3. Then run: bin/openclaw-gcp up --stack-id <stack-id>
+
+Common options:
+  --stack-id <id>      Explicit stack ID
+  --lifecycle <name>   Lifecycle label value (default: persistent)
+  --project-id <id>    Project context override
+  --region <region>    Region context override
+  --zone <zone>        Zone context override
+  -h, --help           Show help
+EOF
+}
+
+command_usage() {
+  case "$1" in
+    welcome)
+      cat <<EOF
+Usage: $(basename "$0") welcome [--stack-id <id>]
+
+Run the non-mutating Cloud Shell welcome flow.
+EOF
+      ;;
+    up)
+      cat <<EOF
+Usage: $(basename "$0") up [--stack-id <id>] [--project-id <id>] [--region <region>] [--zone <zone>] [up passthrough flags]
+
+Bring up one stack by deriving the raw resource names automatically and delegating to scripts/openclaw-gcp/install.sh.
+EOF
+      ;;
+    status)
+      cat <<EOF
+Usage: $(basename "$0") status [--stack-id <id>] [--project-id <id>] [--region <region>] [--zone <zone>] [--json]
+
+Show the current or explicit stack, local convenience state, and GCP-backed anchor verification.
+EOF
+      ;;
+    ssh)
+      cat <<EOF
+Usage: $(basename "$0") ssh [--stack-id <id>] [--project-id <id>] [--region <region>] [--zone <zone>] [-- [ssh args]]
+
+Open an IAP-backed shell for a verified stack instance.
+EOF
+      ;;
+    logs)
+      cat <<EOF
+Usage: $(basename "$0") logs --source <name> [--stack-id <id>] [--project-id <id>] [--region <region>] [--zone <zone>]
+
+Fetch a named remote log stream through verified IAP-backed access.
+Supported sources: $(oc_stack_log_sources_csv)
+EOF
+      ;;
+    down)
+      cat <<EOF
+Usage: $(basename "$0") down [--stack-id <id>] [--project-id <id>] [--region <region>] [--zone <zone>] [destroy passthrough flags]
+
+Tear down one stack by verifying stack ownership through labeled anchors and then delegating to scripts/openclaw-gcp/destroy.sh.
+EOF
+      ;;
+    *)
+      usage
+      ;;
+  esac
+}
+
+die() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+parse_common_args() {
+  STACK_ID=""
+  LIFECYCLE="${OPENCLAW_STACK_DEFAULT_LIFECYCLE}"
+  PROJECT_ID=""
+  REGION=""
+  ZONE=""
+  STATUS_JSON="false"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack-id)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --stack-id"
+        STACK_ID="$2"
+        shift 2
+        ;;
+      --lifecycle)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --lifecycle"
+        LIFECYCLE="$2"
+        shift 2
+        ;;
+      --project-id)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --project-id"
+        PROJECT_ID="$2"
+        shift 2
+        ;;
+      --region)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --region"
+        REGION="$2"
+        shift 2
+        ;;
+      --zone)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --zone"
+        ZONE="$2"
+        shift 2
+        ;;
+      --json)
+        STATUS_JSON="true"
+        shift
+        ;;
+      -h|--help)
+        command_usage "${COMMAND}"
+        exit 0
+        ;;
+      *)
+        die "unknown option for ${COMMAND}: $1"
+        ;;
+    esac
+  done
+}
+
+parse_up_args() {
+  STACK_ID=""
+  LIFECYCLE="${OPENCLAW_STACK_DEFAULT_LIFECYCLE}"
+  PROJECT_ID=""
+  REGION=""
+  ZONE=""
+  STATUS_JSON="false"
+  UP_DRY_RUN="false"
+  INSTALL_PASSTHROUGH_ARGS=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack-id)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --stack-id"
+        STACK_ID="$2"
+        shift 2
+        ;;
+      --lifecycle)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --lifecycle"
+        LIFECYCLE="$2"
+        shift 2
+        ;;
+      --project-id)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --project-id"
+        PROJECT_ID="$2"
+        shift 2
+        ;;
+      --region)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --region"
+        REGION="$2"
+        shift 2
+        ;;
+      --zone)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --zone"
+        ZONE="$2"
+        shift 2
+        ;;
+      --openclaw-tag|--openclaw-image|--service-account|--scopes)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for $1"
+        INSTALL_PASSTHROUGH_ARGS+=("$1" "$2")
+        shift 2
+        ;;
+      --no-service-account|--allow-external-ip|--interactive|--non-interactive)
+        INSTALL_PASSTHROUGH_ARGS+=("$1")
+        shift
+        ;;
+      --dry-run)
+        UP_DRY_RUN="true"
+        INSTALL_PASSTHROUGH_ARGS+=("$1")
+        shift
+        ;;
+      -h|--help)
+        command_usage "${COMMAND}"
+        exit 0
+        ;;
+      *)
+        die "unknown option for ${COMMAND}: $1"
+        ;;
+    esac
+  done
+}
+
+parse_down_args() {
+  STACK_ID=""
+  LIFECYCLE="${OPENCLAW_STACK_DEFAULT_LIFECYCLE}"
+  PROJECT_ID=""
+  REGION=""
+  ZONE=""
+  NETWORK="default"
+  DOWN_DRY_RUN="false"
+  DOWN_ASSUME_YES="false"
+  DOWN_FORCE_INTERACTIVE="false"
+  DOWN_FORCE_NON_INTERACTIVE="false"
+  DESTROY_PASSTHROUGH_ARGS=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack-id)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --stack-id"
+        STACK_ID="$2"
+        shift 2
+        ;;
+      --lifecycle)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --lifecycle"
+        LIFECYCLE="$2"
+        shift 2
+        ;;
+      --project-id)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --project-id"
+        PROJECT_ID="$2"
+        shift 2
+        ;;
+      --region)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --region"
+        REGION="$2"
+        shift 2
+        ;;
+      --zone)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --zone"
+        ZONE="$2"
+        shift 2
+        ;;
+      --network)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --network"
+        NETWORK="$2"
+        DESTROY_PASSTHROUGH_ARGS+=("$1" "$2")
+        shift 2
+        ;;
+      --snapshot-policy-name|--snapshot-policy-disk|--snapshot-policy-disk-zone|--clone-instance-name|--clone-zone|--machine-image-name)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for $1"
+        DESTROY_PASSTHROUGH_ARGS+=("$1" "$2")
+        shift 2
+        ;;
+      --dry-run)
+        DOWN_DRY_RUN="true"
+        DESTROY_PASSTHROUGH_ARGS+=("$1")
+        shift
+        ;;
+      --yes)
+        DOWN_ASSUME_YES="true"
+        DESTROY_PASSTHROUGH_ARGS+=("$1")
+        shift
+        ;;
+      --interactive)
+        DOWN_FORCE_INTERACTIVE="true"
+        DESTROY_PASSTHROUGH_ARGS+=("$1")
+        shift
+        ;;
+      --non-interactive)
+        DOWN_FORCE_NON_INTERACTIVE="true"
+        DESTROY_PASSTHROUGH_ARGS+=("$1")
+        shift
+        ;;
+      -h|--help)
+        command_usage "${COMMAND}"
+        exit 0
+        ;;
+      *)
+        die "unknown option for ${COMMAND}: $1"
+        ;;
+    esac
+  done
+}
+
+parse_ssh_args() {
+  STACK_ID=""
+  PROJECT_ID=""
+  REGION=""
+  ZONE=""
+  SSH_PASSTHROUGH_ARGS=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack-id)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --stack-id"
+        STACK_ID="$2"
+        shift 2
+        ;;
+      --project-id)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --project-id"
+        PROJECT_ID="$2"
+        shift 2
+        ;;
+      --region)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --region"
+        REGION="$2"
+        shift 2
+        ;;
+      --zone)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --zone"
+        ZONE="$2"
+        shift 2
+        ;;
+      --)
+        shift
+        while [[ $# -gt 0 ]]; do
+          SSH_PASSTHROUGH_ARGS+=("$1")
+          shift
+        done
+        ;;
+      -h|--help)
+        command_usage "${COMMAND}"
+        exit 0
+        ;;
+      *)
+        die "unknown option for ${COMMAND}: $1"
+        ;;
+    esac
+  done
+}
+
+parse_logs_args() {
+  STACK_ID=""
+  PROJECT_ID=""
+  REGION=""
+  ZONE=""
+  LOG_SOURCE=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack-id)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --stack-id"
+        STACK_ID="$2"
+        shift 2
+        ;;
+      --project-id)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --project-id"
+        PROJECT_ID="$2"
+        shift 2
+        ;;
+      --region)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --region"
+        REGION="$2"
+        shift 2
+        ;;
+      --zone)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --zone"
+        ZONE="$2"
+        shift 2
+        ;;
+      --source)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --source"
+        LOG_SOURCE="$(oc_stack_require_log_source "$2")"
+        shift 2
+        ;;
+      -h|--help)
+        command_usage "${COMMAND}"
+        exit 0
+        ;;
+      *)
+        die "unknown option for ${COMMAND}: $1"
+        ;;
+    esac
+  done
+
+  [[ -n "${LOG_SOURCE}" ]] || die "logs requires --source <name>. Supported sources: $(oc_stack_log_sources_csv)"
+}
+
+resolve_project_context() {
+  local value="${PROJECT_ID:-}"
+  [[ -n "${value}" ]] || value="$(oc_stack_state_get_or_empty LAST_PROJECT_ID)"
+  [[ -n "${value}" ]] || value="${GOOGLE_CLOUD_PROJECT:-}"
+  [[ -n "${value}" ]] || value="${CLOUDSDK_CORE_PROJECT:-}"
+  if [[ -z "${value}" ]] && command_exists gcloud; then
+    value="$(gcloud config get-value project 2>/dev/null || true)"
+    [[ "${value}" == "(unset)" ]] && value=""
+  fi
+  printf '%s\n' "${value}"
+}
+
+resolve_live_project_context() {
+  local value="${PROJECT_ID:-}"
+  [[ -n "${value}" ]] || value="${GOOGLE_CLOUD_PROJECT:-}"
+  [[ -n "${value}" ]] || value="${CLOUDSDK_CORE_PROJECT:-}"
+  if [[ -z "${value}" ]] && command_exists gcloud; then
+    value="$(gcloud config get-value project 2>/dev/null || true)"
+    [[ "${value}" == "(unset)" ]] && value=""
+  fi
+  printf '%s\n' "${value}"
+}
+
+resolve_region_context() {
+  local value="${REGION:-}"
+  [[ -n "${value}" ]] || value="$(oc_stack_state_get_or_empty LAST_REGION)"
+  [[ -n "${value}" ]] || value="asia-southeast1"
+  printf '%s\n' "${value}"
+}
+
+resolve_zone_context() {
+  local resolved_region="$1"
+  local value="${ZONE:-}"
+  [[ -n "${value}" ]] || value="$(oc_stack_state_get_or_empty LAST_ZONE)"
+  [[ -n "${value}" ]] || value="${resolved_region}-a"
+  printf '%s\n' "${value}"
+}
+
+resolve_stack_id_for_up_or_status() {
+  local explicit="${1:-}" remembered=""
+  if [[ -n "${explicit}" ]]; then
+    SELECTION_SOURCE="explicit"
+    RESOLVED_STACK_ID="$(oc_stack_require_id "${explicit}")"
+    return 0
+  fi
+
+  remembered="$(oc_stack_state_get_or_empty CURRENT_STACK_ID)"
+  if [[ -n "${remembered}" ]]; then
+    SELECTION_SOURCE="current-state"
+    RESOLVED_STACK_ID="$(oc_stack_require_id "${remembered}")"
+    return 0
+  fi
+
+  if [[ "${COMMAND}" == "up" ]]; then
+    die "up requires --stack-id on first use. In Cloud Shell, start with: bin/openclaw-gcp welcome"
+  fi
+
+  die "no stack ID provided and no CURRENT_STACK_ID found in $(oc_stack_state_file)"
+}
+
+join_lines_with() {
+  local delimiter="$1"
+  local input="${2:-}"
+  printf '%s\n' "${input}" | sed '/^$/d' | paste -sd "${delimiter}" -
+}
+
+stack_ids_to_csv() {
+  local input="${1:-}"
+  join_lines_with "," "${input}"
+}
+
+stack_ids_to_space_list() {
+  local input="${1:-}"
+  local joined
+  joined="$(join_lines_with " " "${input}")"
+  if [[ -n "${joined}" ]]; then
+    printf '%s\n' "${joined}"
+    return 0
+  fi
+  printf '<none>\n'
+}
+
+normalize_unique_stack_ids() {
+  local raw normalized
+  while IFS= read -r raw; do
+    [[ -n "${raw}" ]] || continue
+    normalized="$(oc_stack_normalize_id "${raw}" 2>/dev/null || true)"
+    [[ -n "${normalized}" && "${normalized}" == "${raw}" ]] || continue
+    printf '%s\n' "${normalized}"
+  done | sort -u
+}
+
+discover_recovery_stack_ids_nl() {
+  local resource_kind="$1"
+  local project_id="$2"
+  local filter
+  local output=""
+
+  filter="labels.${OPENCLAW_STACK_LABEL_MANAGED_KEY}=true AND labels.${OPENCLAW_STACK_LABEL_TOOL_KEY}=${OPENCLAW_STACK_TOOL} AND labels.${OPENCLAW_STACK_LABEL_STACK_KEY}:*"
+
+  case "${resource_kind}" in
+    instance)
+      output="$(
+        gcloud compute instances list \
+          --project "${project_id}" \
+          --filter "${filter}" \
+          --format="value(labels.${OPENCLAW_STACK_LABEL_STACK_KEY})" 2>/dev/null || true
+      )"
+      ;;
+    template)
+      output="$(
+        gcloud compute instance-templates list \
+          --project "${project_id}" \
+          --filter "${filter}" \
+          --format="value(labels.${OPENCLAW_STACK_LABEL_STACK_KEY})" 2>/dev/null || true
+      )"
+      ;;
+    *)
+      die "unknown recovery resource kind: ${resource_kind}"
+      ;;
+  esac
+
+  normalize_unique_stack_ids <<<"${output}"
+}
+
+recover_stack_candidates() {
+  local project_id="$1"
+  local instance_ids template_ids instance_only template_only
+
+  instance_ids="$(discover_recovery_stack_ids_nl "instance" "${project_id}")"
+  template_ids="$(discover_recovery_stack_ids_nl "template" "${project_id}")"
+
+  RECOVERY_CANDIDATES_NL="$(comm -12 <(printf '%s\n' "${instance_ids}" | sed '/^$/d' | sort -u) <(printf '%s\n' "${template_ids}" | sed '/^$/d' | sort -u))"
+  instance_only="$(comm -23 <(printf '%s\n' "${instance_ids}" | sed '/^$/d' | sort -u) <(printf '%s\n' "${template_ids}" | sed '/^$/d' | sort -u) | sed 's/$/:instance/')"
+  template_only="$(comm -13 <(printf '%s\n' "${instance_ids}" | sed '/^$/d' | sort -u) <(printf '%s\n' "${template_ids}" | sed '/^$/d' | sort -u) | sed 's/$/:template/')"
+  RECOVERY_PARTIALS_NL="$(printf '%s\n%s\n' "${instance_only}" "${template_only}" | sed '/^$/d' | sort -u)"
+}
+
+resolve_stack_id_for_status() {
+  local explicit="${1:-}"
+  local remembered="${2:-}"
+  local project_id="${3:-}"
+  local candidate_count partial_count sole_candidate
+
+  RECOVERY_NOTE=""
+  RECOVERY_CANDIDATES_CSV=""
+  RECOVERY_PARTIALS_CSV=""
+  RECOVERY_CANDIDATES_NL=""
+  RECOVERY_PARTIALS_NL=""
+
+  if [[ -n "${explicit}" ]]; then
+    SELECTION_SOURCE="explicit"
+    RESOLVED_STACK_ID="$(oc_stack_require_id "${explicit}")"
+    return 0
+  fi
+
+  # Without gcloud+project context, keep existing local-state behavior for status.
+  if ! command_exists gcloud || [[ -z "${project_id}" ]]; then
+    if [[ -n "${remembered}" ]]; then
+      SELECTION_SOURCE="current-state"
+      RESOLVED_STACK_ID="$(oc_stack_require_id "${remembered}")"
+      return 0
+    fi
+    if ! command_exists gcloud; then
+      die "status has insufficient context: no --stack-id, no CURRENT_STACK_ID in $(oc_stack_state_file), and gcloud is not available for recovery discovery."
+    fi
+    die "status has insufficient context: no --stack-id, no CURRENT_STACK_ID in $(oc_stack_state_file), and no project context. Pass --project-id or set gcloud project."
+  fi
+
+  recover_stack_candidates "${project_id}"
+  RECOVERY_CANDIDATES_CSV="$(stack_ids_to_csv "${RECOVERY_CANDIDATES_NL}")"
+  RECOVERY_PARTIALS_CSV="$(stack_ids_to_csv "${RECOVERY_PARTIALS_NL}")"
+  candidate_count="$(printf '%s\n' "${RECOVERY_CANDIDATES_NL}" | sed '/^$/d' | wc -l | tr -d ' ')"
+  partial_count="$(printf '%s\n' "${RECOVERY_PARTIALS_NL}" | sed '/^$/d' | wc -l | tr -d ' ')"
+  sole_candidate="$(printf '%s\n' "${RECOVERY_CANDIDATES_NL}" | sed '/^$/d' | head -n1)"
+
+  if (( partial_count > 0 )); then
+    die "status recovery failed: labeled anchors disagree (${RECOVERY_PARTIALS_CSV}). Pass --stack-id explicitly."
+  fi
+
+  if [[ -n "${remembered}" ]] && printf '%s\n' "${RECOVERY_CANDIDATES_NL}" | sed '/^$/d' | grep -Fxq "${remembered}"; then
+    SELECTION_SOURCE="current-state"
+    if (( candidate_count == 1 )); then
+      RECOVERY_NOTE="current stack verified against one recovered candidate."
+    else
+      RECOVERY_NOTE="current stack is present in recovered candidates."
+    fi
+    RESOLVED_STACK_ID="$(oc_stack_require_id "${remembered}")"
+    return 0
+  fi
+
+  if (( candidate_count == 1 )); then
+    SELECTION_SOURCE="recovered-single-candidate"
+    if [[ -n "${remembered}" ]]; then
+      RECOVERY_NOTE="current state '${remembered}' appears stale; status recovered '${sole_candidate}' from labels."
+    else
+      RECOVERY_NOTE="status recovered '${sole_candidate}' from labels because local current state is missing."
+    fi
+    RESOLVED_STACK_ID="${sole_candidate}"
+    return 0
+  fi
+
+  if (( candidate_count == 0 )); then
+    if [[ -n "${remembered}" ]]; then
+      die "status recovery found no recoverable stack candidates in project '${project_id}' and current state '${remembered}' appears stale. Pass --stack-id explicitly."
+    fi
+    die "status recovery found no recoverable stack candidates in project '${project_id}'. Pass --stack-id explicitly."
+  fi
+
+  die "status recovery is ambiguous in project '${project_id}' (candidates: ${RECOVERY_CANDIDATES_CSV}). Pass --stack-id explicitly."
+}
+
+resolve_stack_id_for_down() {
+  local explicit="${1:-}" remembered=""
+  if [[ -n "${explicit}" ]]; then
+    SELECTION_SOURCE="explicit"
+    RESOLVED_STACK_ID="$(oc_stack_require_id "${explicit}")"
+    return 0
+  fi
+
+  if oc_stack_is_cloud_shell && [[ "${DOWN_FORCE_NON_INTERACTIVE}" != "true" ]] && oc_stack_is_interactive_session; then
+    remembered="$(oc_stack_state_get_or_empty CURRENT_STACK_ID)"
+    if [[ -n "${remembered}" ]]; then
+      SELECTION_SOURCE="current-state"
+      RESOLVED_STACK_ID="$(oc_stack_require_id "${remembered}")"
+      return 0
+    fi
+  fi
+
+  die "down requires --stack-id outside interactive Cloud Shell sessions, or when no current stack is remembered in $(oc_stack_state_file)"
+}
+
+resolve_project_context_for_down() {
+  local value=""
+  value="$(resolve_live_project_context)"
+  if [[ -z "${value}" ]] && oc_stack_is_cloud_shell && [[ "${DOWN_FORCE_NON_INTERACTIVE}" != "true" ]] && oc_stack_is_interactive_session; then
+    value="$(oc_stack_state_get_or_empty LAST_PROJECT_ID)"
+  fi
+  printf '%s\n' "${value}"
+}
+
+resource_label_tuple() {
+  local resource_kind="$1"
+  local resource_name="$2"
+  local project_id="$3"
+  local location="$4"
+  local label_output=""
+
+  case "${resource_kind}" in
+    instance)
+      label_output="$(
+        gcloud compute instances describe "${resource_name}" \
+          --project "${project_id}" \
+          --zone "${location}" \
+          --format='value(labels.openclaw_managed,labels.openclaw_stack_id,labels.openclaw_tool,labels.openclaw_lifecycle)' 2>/dev/null || true
+      )"
+      ;;
+    template)
+      label_output="$(
+        gcloud compute instance-templates describe "${resource_name}" \
+          --project "${project_id}" \
+          --region "${location}" \
+          --format='value(labels.openclaw_managed,labels.openclaw_stack_id,labels.openclaw_tool,labels.openclaw_lifecycle)' 2>/dev/null || true
+      )"
+      ;;
+    *)
+      die "unknown labelable resource kind: ${resource_kind}"
+      ;;
+  esac
+
+  printf '%s\n' "${label_output}"
+}
+
+resource_exists() {
+  local resource_kind="$1"
+  local resource_name="$2"
+  local project_id="$3"
+  local location="$4"
+  local router_name="${5:-}"
+
+  case "${resource_kind}" in
+    instance)
+      gcloud compute instances describe "${resource_name}" --project "${project_id}" --zone "${location}" --format='value(name)' >/dev/null 2>&1
+      ;;
+    template)
+      gcloud compute instance-templates describe "${resource_name}" --project "${project_id}" --region "${location}" --format='value(name)' >/dev/null 2>&1
+      ;;
+    router)
+      gcloud compute routers describe "${resource_name}" --project "${project_id}" --region "${location}" --format='value(name)' >/dev/null 2>&1
+      ;;
+    nat)
+      gcloud compute routers nats describe "${resource_name}" --project "${project_id}" --router "${router_name}" --region "${location}" --format='value(name)' >/dev/null 2>&1
+      ;;
+    *)
+      die "unknown resource kind: ${resource_kind}"
+      ;;
+  esac
+}
+
+inspect_anchor() {
+  local resource_kind="$1"
+  local resource_name="$2"
+  local project_id="$3"
+  local location="$4"
+  local expected_stack_id="$5"
+  local managed=""
+  local actual_stack_id=""
+  local tool=""
+  local lifecycle=""
+  local tuple=""
+
+  ANCHOR_EXISTS="false"
+  ANCHOR_VERIFIED="false"
+  ANCHOR_NOTE="missing"
+  ANCHOR_LIFECYCLE=""
+
+  if ! resource_exists "${resource_kind}" "${resource_name}" "${project_id}" "${location}"; then
+    return 0
+  fi
+
+  ANCHOR_EXISTS="true"
+  tuple="$(resource_label_tuple "${resource_kind}" "${resource_name}" "${project_id}" "${location}")"
+  IFS=$'\t' read -r managed actual_stack_id tool lifecycle <<<"${tuple}"
+  ANCHOR_LIFECYCLE="${lifecycle:-}"
+
+  if [[ "${managed}" == "true" && "${actual_stack_id}" == "${expected_stack_id}" && "${tool}" == "${OPENCLAW_STACK_TOOL}" ]]; then
+    ANCHOR_VERIFIED="true"
+    ANCHOR_NOTE="labels verified"
+    return 0
+  fi
+
+  ANCHOR_NOTE="label mismatch (managed=${managed:-unset}, stack_id=${actual_stack_id:-unset}, tool=${tool:-unset})"
+}
+
+verify_stack_anchors_or_die() {
+  local stack_id="$1"
+  local project_id="$2"
+  local region="$3"
+  local zone="$4"
+  local instance_name template_name
+  local verified_count=0
+  local mismatch_messages=()
+
+  instance_name="$(oc_stack_instance_name "${stack_id}")"
+  template_name="$(oc_stack_template_name "${stack_id}")"
+
+  inspect_anchor "instance" "${instance_name}" "${project_id}" "${zone}" "${stack_id}"
+  if [[ "${ANCHOR_EXISTS}" == "true" && "${ANCHOR_VERIFIED}" == "true" ]]; then
+    verified_count=$((verified_count + 1))
+  elif [[ "${ANCHOR_EXISTS}" == "true" ]]; then
+    mismatch_messages+=("instance ${instance_name}: ${ANCHOR_NOTE}")
+  fi
+
+  inspect_anchor "template" "${template_name}" "${project_id}" "${region}" "${stack_id}"
+  if [[ "${ANCHOR_EXISTS}" == "true" && "${ANCHOR_VERIFIED}" == "true" ]]; then
+    verified_count=$((verified_count + 1))
+  elif [[ "${ANCHOR_EXISTS}" == "true" ]]; then
+    mismatch_messages+=("template ${template_name}: ${ANCHOR_NOTE}")
+  fi
+
+  if (( ${#mismatch_messages[@]} > 0 )); then
+    printf '%s\n' "${mismatch_messages[@]}" >&2
+    die "stack anchor verification failed for stack '${stack_id}'. Refusing teardown because the labeled GCP anchors do not match."
+  fi
+
+  (( verified_count > 0 )) || die "stack anchor verification failed for stack '${stack_id}'. Neither the instance nor template exists with matching OpenClaw stack labels in project '${project_id}'."
+}
+
+verify_stack_remote_access_or_die() {
+  local stack_id="$1"
+  local project_id="$2"
+  local region="$3"
+  local zone="$4"
+  local instance_name template_name
+  local mismatch_messages=()
+
+  instance_name="$(oc_stack_instance_name "${stack_id}")"
+  template_name="$(oc_stack_template_name "${stack_id}")"
+
+  inspect_anchor "instance" "${instance_name}" "${project_id}" "${zone}" "${stack_id}"
+  if [[ "${ANCHOR_EXISTS}" != "true" ]]; then
+    die "remote access verification failed for stack '${stack_id}'. Instance '${instance_name}' is missing in project '${project_id}' zone '${zone}'."
+  fi
+  if [[ "${ANCHOR_VERIFIED}" != "true" ]]; then
+    mismatch_messages+=("instance ${instance_name}: ${ANCHOR_NOTE}")
+  fi
+
+  inspect_anchor "template" "${template_name}" "${project_id}" "${region}" "${stack_id}"
+  if [[ "${ANCHOR_EXISTS}" == "true" && "${ANCHOR_VERIFIED}" != "true" ]]; then
+    mismatch_messages+=("template ${template_name}: ${ANCHOR_NOTE}")
+  fi
+
+  if (( ${#mismatch_messages[@]} > 0 )); then
+    printf '%s\n' "${mismatch_messages[@]}" >&2
+    die "remote access verification failed for stack '${stack_id}'. Refusing SSH because stack anchors are not trustworthy."
+  fi
+}
+
+run_welcome() {
+  [[ -x "${WELCOME_SCRIPT}" ]] || die "welcome script is not executable: ${WELCOME_SCRIPT}"
+  exec "${WELCOME_SCRIPT}" "$@"
+}
+
+run_up() {
+  local instance_name template_name router_name nat_name labels_csv
+  local resolved_project resolved_region resolved_zone
+  local -a install_cmd
+
+  parse_up_args "$@"
+  resolve_stack_id_for_up_or_status "${STACK_ID}"
+  STACK_ID="${RESOLVED_STACK_ID}"
+  resolved_project="$(resolve_project_context)"
+  resolved_region="$(resolve_region_context)"
+  resolved_zone="$(resolve_zone_context "${resolved_region}")"
+
+  instance_name="$(oc_stack_instance_name "${STACK_ID}")"
+  template_name="$(oc_stack_template_name "${STACK_ID}")"
+  router_name="$(oc_stack_router_name "${STACK_ID}")"
+  nat_name="$(oc_stack_nat_name "${STACK_ID}")"
+  labels_csv="$(oc_stack_labels_csv "${STACK_ID}" "${LIFECYCLE}")"
+
+  install_cmd=(
+    bash "${INSTALL_SCRIPT}"
+    --instance-name "${instance_name}"
+    --template-name "${template_name}"
+    --router-name "${router_name}"
+    --nat-name "${nat_name}"
+    --resource-labels "${labels_csv}"
+  )
+  [[ -n "${resolved_project}" ]] && install_cmd+=(--project-id "${resolved_project}")
+  [[ -n "${resolved_region}" ]] && install_cmd+=(--region "${resolved_region}")
+  [[ -n "${resolved_zone}" ]] && install_cmd+=(--zone "${resolved_zone}")
+  install_cmd+=("${INSTALL_PASSTHROUGH_ARGS[@]}")
+
+  cat <<EOF
+[up] Stack contract resolved.
+Delegating bring-up to scripts/openclaw-gcp/install.sh with derived names.
+
+selection_source=$(printf '%s' "${SELECTION_SOURCE}")
+$(oc_stack_print_contract "${STACK_ID}" "${LIFECYCLE}")
+project_id=${resolved_project:-}
+region=${resolved_region}
+zone=${resolved_zone}
+EOF
+
+  if [[ "${UP_DRY_RUN}" != "true" ]]; then
+    oc_stack_state_write_current "${STACK_ID}" "${resolved_project}" "${resolved_region}" "${resolved_zone}" "${LIFECYCLE}"
+    echo "Saved current stack convenience state to $(oc_stack_state_file)"
+  fi
+
+  "${install_cmd[@]}"
+
+  if [[ "${UP_DRY_RUN}" == "true" ]]; then
+    echo "Dry-run mode: skipping current-stack state write."
+  fi
+}
+
+run_status() {
+  local resolved_project resolved_region resolved_zone
+  local state_stack_id state_project_id state_region state_zone state_lifecycle
+  local instance_name template_name router_name nat_name labels_csv
+  local instance_status template_status router_status nat_status
+  local instance_note template_note context_note=""
+  local verified_lifecycle=""
+  local recovery_state_repaired="false"
+  local gcloud_available="false"
+  local project_context_resolved="false"
+  local cloud_shell="false"
+
+  parse_common_args "$@"
+  resolved_project="$(resolve_project_context)"
+  resolved_region="$(resolve_region_context)"
+  resolved_zone="$(resolve_zone_context "${resolved_region}")"
+  command_exists gcloud && gcloud_available="true"
+  [[ -n "${resolved_project}" ]] && project_context_resolved="true"
+  oc_stack_is_cloud_shell && cloud_shell="true"
+
+  state_stack_id="$(oc_stack_state_get_or_empty CURRENT_STACK_ID)"
+  state_project_id="$(oc_stack_state_get_or_empty LAST_PROJECT_ID)"
+  state_region="$(oc_stack_state_get_or_empty LAST_REGION)"
+  state_zone="$(oc_stack_state_get_or_empty LAST_ZONE)"
+  state_lifecycle="$(oc_stack_state_get_or_empty LIFECYCLE)"
+  [[ -z "${state_lifecycle}" ]] || LIFECYCLE="${state_lifecycle}"
+  resolve_stack_id_for_status "${STACK_ID}" "${state_stack_id}" "${resolved_project}"
+  STACK_ID="${RESOLVED_STACK_ID}"
+
+  instance_name="$(oc_stack_instance_name "${STACK_ID}")"
+  template_name="$(oc_stack_template_name "${STACK_ID}")"
+  router_name="$(oc_stack_router_name "${STACK_ID}")"
+  nat_name="$(oc_stack_nat_name "${STACK_ID}")"
+  labels_csv="$(oc_stack_labels_csv "${STACK_ID}" "${LIFECYCLE}")"
+
+  if ! command_exists gcloud; then
+    instance_status="unknown"
+    template_status="unknown"
+    router_status="unknown"
+    nat_status="unknown"
+    instance_note="gcloud not available in PATH"
+    template_note="gcloud not available in PATH"
+    context_note="Install gcloud or run inside Cloud Shell to get live resource existence checks."
+  elif [[ -z "${resolved_project}" ]]; then
+    instance_status="unknown"
+    template_status="unknown"
+    router_status="unknown"
+    nat_status="unknown"
+    instance_note="missing project context"
+    template_note="missing project context"
+    context_note="Pass --project-id or run 'up' once to persist LAST_PROJECT_ID in $(oc_stack_state_file)."
+  else
+    inspect_anchor "instance" "${instance_name}" "${resolved_project}" "${resolved_zone}" "${STACK_ID}"
+    if [[ "${ANCHOR_EXISTS}" == "true" ]]; then
+      instance_status="present"
+      instance_note="${ANCHOR_NOTE}"
+      [[ -z "${verified_lifecycle}" && -n "${ANCHOR_LIFECYCLE}" ]] && verified_lifecycle="${ANCHOR_LIFECYCLE}"
+    else
+      instance_status="missing"
+      instance_note="not found"
+    fi
+
+    inspect_anchor "template" "${template_name}" "${resolved_project}" "${resolved_region}" "${STACK_ID}"
+    if [[ "${ANCHOR_EXISTS}" == "true" ]]; then
+      template_status="present"
+      template_note="${ANCHOR_NOTE}"
+      [[ -z "${verified_lifecycle}" && -n "${ANCHOR_LIFECYCLE}" ]] && verified_lifecycle="${ANCHOR_LIFECYCLE}"
+    else
+      template_status="missing"
+      template_note="not found"
+    fi
+
+    resource_exists "router" "${router_name}" "${resolved_project}" "${resolved_region}" && router_status="present" || router_status="missing"
+    resource_exists "nat" "${nat_name}" "${resolved_project}" "${resolved_region}" "${router_name}" && nat_status="present" || nat_status="missing"
+  fi
+
+  [[ -z "${verified_lifecycle}" ]] || LIFECYCLE="${verified_lifecycle}"
+
+  if [[ "${SELECTION_SOURCE}" == "recovered-single-candidate" ]]; then
+    oc_stack_state_write_current "${STACK_ID}" "${resolved_project}" "${resolved_region}" "${resolved_zone}" "${LIFECYCLE}"
+    recovery_state_repaired="true"
+    state_stack_id="${STACK_ID}"
+    state_project_id="${resolved_project}"
+    state_region="${resolved_region}"
+    state_zone="${resolved_zone}"
+    state_lifecycle="${LIFECYCLE}"
+    if [[ -n "${RECOVERY_NOTE}" ]]; then
+      RECOVERY_NOTE="${RECOVERY_NOTE} Repaired local current-stack state in $(oc_stack_state_file)."
+    else
+      RECOVERY_NOTE="Repaired local current-stack state in $(oc_stack_state_file)."
+    fi
+  fi
+
+  if [[ "${STATUS_JSON}" == "true" ]]; then
+    cat <<EOF
+{"stack_id":"${STACK_ID}","selection_source":"${SELECTION_SOURCE}","lifecycle":"${LIFECYCLE}","project_id":"${resolved_project}","region":"${resolved_region}","zone":"${resolved_zone}","instance":{"name":"${instance_name}","status":"${instance_status}","note":"${instance_note:-}"},"template":{"name":"${template_name}","status":"${template_status}","note":"${template_note:-}"},"router":{"name":"${router_name}","status":"${router_status}"},"nat":{"name":"${nat_name}","status":"${nat_status}"},"state_file":"$(oc_stack_state_file)","current_stack_id":"${state_stack_id}","state_repaired":"${recovery_state_repaired}","context":{"gcloud_available":${gcloud_available},"project_context_resolved":${project_context_resolved},"cloud_shell":${cloud_shell},"note":"${context_note:-}"},"state":{"file":"$(oc_stack_state_file)","current_stack_id":"${state_stack_id:-}","last_project_id":"${state_project_id:-}","last_region":"${state_region:-}","last_zone":"${state_zone:-}","lifecycle":"${state_lifecycle:-}","repaired":"${recovery_state_repaired}"},"recovery":{"note":"${RECOVERY_NOTE:-}","recovered_candidates":"${RECOVERY_CANDIDATES_CSV:-}","partial_anchor_ids":"${RECOVERY_PARTIALS_CSV:-}"}}
+EOF
+    return 0
+  fi
+
+  cat <<EOF
+OpenClaw GCP Stack Status
+=========================
+stack_id: ${STACK_ID}
+selection_source: ${SELECTION_SOURCE}
+lifecycle: ${LIFECYCLE}
+
+Context
+  project_id: ${resolved_project:-<unknown>}
+  region: ${resolved_region}
+  zone: ${resolved_zone}
+  cloud_shell: $(oc_stack_is_cloud_shell && printf 'true' || printf 'false')
+
+Durable Stack Anchors
+  instance (${instance_name}): ${instance_status} (${instance_note:-n/a})
+  template (${template_name}): ${template_status} (${template_note:-n/a})
+
+Deterministic Companion Resources
+  router (${router_name}): ${router_status}
+  nat (${nat_name}): ${nat_status}
+
+Ownership Contract
+  durable_truth: labels on the instance/template anchors
+  label_selector: ${labels_csv}
+  router_nat_resolution: deterministic companion names derived from stack_id
+
+Local Convenience State
+  state_file: $(oc_stack_state_file)
+  current_stack_id: ${state_stack_id:-<none>}
+  last_project_id: ${state_project_id:-<none>}
+  last_region: ${state_region:-<none>}
+  last_zone: ${state_zone:-<none>}
+EOF
+
+  if [[ -n "${RECOVERY_NOTE}" || -n "${RECOVERY_CANDIDATES_CSV}" || -n "${RECOVERY_PARTIALS_CSV}" ]]; then
+    echo
+    echo "Recovery Path"
+    echo "  note: ${RECOVERY_NOTE:-<none>}"
+    echo "  recovered_candidates: $(stack_ids_to_space_list "${RECOVERY_CANDIDATES_NL}")"
+    echo "  partial_anchor_ids: $(stack_ids_to_space_list "${RECOVERY_PARTIALS_NL}")"
+    echo "  state_repaired: ${recovery_state_repaired}"
+  fi
+
+  if [[ -n "${context_note}" ]]; then
+    echo
+    echo "Note: ${context_note}"
+  fi
+}
+
+run_down() {
+  local resolved_project resolved_region resolved_zone
+  local instance_name template_name router_name nat_name
+  local -a destroy_cmd
+
+  parse_down_args "$@"
+  resolve_stack_id_for_down "${STACK_ID}"
+  STACK_ID="${RESOLVED_STACK_ID}"
+  resolved_project="$(resolve_project_context_for_down)"
+  resolved_region="$(resolve_region_context)"
+  resolved_zone="$(resolve_zone_context "${resolved_region}")"
+
+  [[ -n "${resolved_project}" ]] || die "down could not resolve a project context. Pass --project-id or run 'up' first so the project is recorded in $(oc_stack_state_file)."
+  command_exists gcloud || die "down requires gcloud in PATH so it can verify the stack anchors before teardown."
+
+  instance_name="$(oc_stack_instance_name "${STACK_ID}")"
+  template_name="$(oc_stack_template_name "${STACK_ID}")"
+  router_name="$(oc_stack_router_name "${STACK_ID}")"
+  nat_name="$(oc_stack_nat_name "${STACK_ID}")"
+
+  verify_stack_anchors_or_die "${STACK_ID}" "${resolved_project}" "${resolved_region}" "${resolved_zone}"
+
+  cat <<EOF
+[down] Stack anchors verified through GCP labels.
+Delegating teardown to scripts/openclaw-gcp/destroy.sh with derived names.
+
+selection_source=${SELECTION_SOURCE}
+$(oc_stack_print_contract "${STACK_ID}" "${LIFECYCLE}")
+project_id=${resolved_project}
+region=${resolved_region}
+zone=${resolved_zone}
+network=${NETWORK}
+EOF
+
+  destroy_cmd=(
+    bash "${DESTROY_SCRIPT}"
+    --project-id "${resolved_project}"
+    --instance-name "${instance_name}"
+    --template-name "${template_name}"
+    --router-name "${router_name}"
+    --nat-name "${nat_name}"
+    --region "${resolved_region}"
+    --zone "${resolved_zone}"
+    --network "${NETWORK}"
+  )
+  destroy_cmd+=("${DESTROY_PASSTHROUGH_ARGS[@]}")
+
+  "${destroy_cmd[@]}"
+
+  if [[ "${DOWN_DRY_RUN}" != "true" ]]; then
+    oc_stack_state_clear_current_if_matches "${STACK_ID}"
+    echo "Cleared current stack pointer in $(oc_stack_state_file) because stack '${STACK_ID}' was torn down."
+  fi
+}
+
+run_ssh() {
+  local resolved_project resolved_region resolved_zone
+  local instance_name
+  local remembered_stack_id
+  local -a ssh_cmd
+
+  parse_ssh_args "$@"
+  resolved_project="$(resolve_project_context)"
+  resolved_region="$(resolve_region_context)"
+  resolved_zone="$(resolve_zone_context "${resolved_region}")"
+
+  [[ -n "${resolved_project}" ]] || die "ssh has insufficient context: no project resolved. Pass --project-id or run 'up' once so LAST_PROJECT_ID is recorded in $(oc_stack_state_file)."
+  command_exists gcloud || die "ssh requires gcloud in PATH."
+
+  remembered_stack_id="$(oc_stack_state_get_or_empty CURRENT_STACK_ID)"
+  resolve_stack_id_for_status "${STACK_ID}" "${remembered_stack_id}" "${resolved_project}"
+  STACK_ID="${RESOLVED_STACK_ID}"
+
+  instance_name="$(oc_stack_instance_name "${STACK_ID}")"
+  verify_stack_remote_access_or_die "${STACK_ID}" "${resolved_project}" "${resolved_region}" "${resolved_zone}"
+
+  ssh_cmd=(
+    gcloud compute ssh "${instance_name}"
+    --project "${resolved_project}"
+    --zone "${resolved_zone}"
+    --tunnel-through-iap
+  )
+  if (( ${#SSH_PASSTHROUGH_ARGS[@]} > 0 )); then
+    ssh_cmd+=(-- "${SSH_PASSTHROUGH_ARGS[@]}")
+  fi
+
+  cat <<EOF
+[ssh] Stack anchors verified through GCP labels.
+Opening IAP-backed SSH for stack '${STACK_ID}'.
+
+selection_source=${SELECTION_SOURCE}
+project_id=${resolved_project}
+region=${resolved_region}
+zone=${resolved_zone}
+instance_name=${instance_name}
+EOF
+
+  exec "${ssh_cmd[@]}"
+}
+
+logs_remote_script_for_source() {
+  local source_name="$1"
+
+  case "${source_name}" in
+    "${OPENCLAW_STACK_LOG_SOURCE_READINESS}")
+      cat <<'EOF'
+set -euo pipefail
+log_path="$HOME/.openclaw-gcp/install-logs/readiness-gate.log"
+if [[ ! -f "${log_path}" ]]; then
+  echo "logs source 'readiness' unavailable: missing ${log_path}" >&2
+  exit 1
+fi
+tail -n 200 "${log_path}"
+EOF
+      ;;
+    "${OPENCLAW_STACK_LOG_SOURCE_INSTALL}")
+      cat <<'EOF'
+set -euo pipefail
+log_path="$HOME/.openclaw-gcp/install-logs/latest.log"
+if [[ ! -f "${log_path}" ]]; then
+  echo "logs source 'install' unavailable: missing ${log_path}" >&2
+  exit 1
+fi
+tail -n 200 "${log_path}"
+EOF
+      ;;
+    "${OPENCLAW_STACK_LOG_SOURCE_BOOTSTRAP}")
+      cat <<'EOF'
+set -euo pipefail
+log_path="/var/log/openclaw/bootstrap.log"
+if [[ ! -f "${log_path}" ]]; then
+  echo "logs source 'bootstrap' unavailable: missing ${log_path}" >&2
+  exit 1
+fi
+tail -n 200 "${log_path}"
+EOF
+      ;;
+    "${OPENCLAW_STACK_LOG_SOURCE_GATEWAY}")
+      cat <<'EOF'
+set -euo pipefail
+container_name="openclaw_openclaw-gateway_1"
+if ! command -v docker >/dev/null 2>&1; then
+  echo "logs source 'gateway' unavailable: docker CLI is missing on remote host" >&2
+  exit 1
+fi
+if ! docker ps --format '{{.Names}}' | grep -Fxq "${container_name}"; then
+  echo "logs source 'gateway' unavailable: container ${container_name} is not running" >&2
+  exit 1
+fi
+docker logs --tail 200 "${container_name}"
+EOF
+      ;;
+    *)
+      die "unsupported logs source '${source_name}'. Supported sources: $(oc_stack_log_sources_csv)"
+      ;;
+  esac
+}
+
+run_logs() {
+  local resolved_project resolved_region resolved_zone
+  local instance_name remembered_stack_id remote_script
+  local -a logs_cmd
+
+  parse_logs_args "$@"
+  resolved_project="$(resolve_project_context)"
+  resolved_region="$(resolve_region_context)"
+  resolved_zone="$(resolve_zone_context "${resolved_region}")"
+
+  [[ -n "${resolved_project}" ]] || die "logs has insufficient context: no project resolved. Pass --project-id or run 'up' once so LAST_PROJECT_ID is recorded in $(oc_stack_state_file)."
+  command_exists gcloud || die "logs requires gcloud in PATH."
+
+  remembered_stack_id="$(oc_stack_state_get_or_empty CURRENT_STACK_ID)"
+  resolve_stack_id_for_status "${STACK_ID}" "${remembered_stack_id}" "${resolved_project}"
+  STACK_ID="${RESOLVED_STACK_ID}"
+
+  instance_name="$(oc_stack_instance_name "${STACK_ID}")"
+  verify_stack_remote_access_or_die "${STACK_ID}" "${resolved_project}" "${resolved_region}" "${resolved_zone}"
+  remote_script="$(logs_remote_script_for_source "${LOG_SOURCE}")"
+
+  logs_cmd=(
+    gcloud compute ssh "${instance_name}"
+    --project "${resolved_project}"
+    --zone "${resolved_zone}"
+    --tunnel-through-iap
+    --command "bash -lc $(printf '%q' "${remote_script}")"
+  )
+
+  cat <<EOF
+[logs] Stack anchors verified through GCP labels.
+Fetching '${LOG_SOURCE}' logs over IAP-backed SSH for stack '${STACK_ID}'.
+
+selection_source=${SELECTION_SOURCE}
+project_id=${resolved_project}
+region=${resolved_region}
+zone=${resolved_zone}
+instance_name=${instance_name}
+source=${LOG_SOURCE}
+EOF
+
+  exec "${logs_cmd[@]}"
+}
+
+COMMAND="${1:-help}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
+
+case "${COMMAND}" in
+  welcome)
+    run_welcome "$@"
+    ;;
+  up)
+    run_up "$@"
+    ;;
+  status)
+    run_status "$@"
+    ;;
+  ssh)
+    run_ssh "$@"
+    ;;
+  logs)
+    run_logs "$@"
+    ;;
+  down)
+    run_down "$@"
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    die "unknown command: ${COMMAND}"
+    ;;
+esac
