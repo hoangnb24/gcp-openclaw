@@ -9,6 +9,10 @@ OPENCLAW_STACK_LABEL_LIFECYCLE_KEY="openclaw_lifecycle"
 OPENCLAW_STACK_DEFAULT_LIFECYCLE="persistent"
 OPENCLAW_STACK_RESOURCE_PREFIX="oc"
 OPENCLAW_STACK_MAX_ID_LEN="40"
+OPENCLAW_STACK_LOG_SOURCE_READINESS="readiness"
+OPENCLAW_STACK_LOG_SOURCE_INSTALL="install"
+OPENCLAW_STACK_LOG_SOURCE_BOOTSTRAP="bootstrap"
+OPENCLAW_STACK_LOG_SOURCE_GATEWAY="gateway"
 
 oc_stack_die() {
   echo "Error: $*" >&2
@@ -175,4 +179,32 @@ nat_name=$(oc_stack_nat_name "${stack_id}")
 labels=$(oc_stack_labels_csv "${stack_id}" "${lifecycle}")
 state_file=$(oc_stack_state_file)
 EOF
+}
+
+oc_stack_log_sources_space_list() {
+  printf '%s\n' \
+    "${OPENCLAW_STACK_LOG_SOURCE_READINESS} ${OPENCLAW_STACK_LOG_SOURCE_INSTALL} ${OPENCLAW_STACK_LOG_SOURCE_BOOTSTRAP} ${OPENCLAW_STACK_LOG_SOURCE_GATEWAY}"
+}
+
+oc_stack_log_sources_csv() {
+  printf '%s\n' \
+    "${OPENCLAW_STACK_LOG_SOURCE_READINESS},${OPENCLAW_STACK_LOG_SOURCE_INSTALL},${OPENCLAW_STACK_LOG_SOURCE_BOOTSTRAP},${OPENCLAW_STACK_LOG_SOURCE_GATEWAY}"
+}
+
+oc_stack_require_log_source() {
+  local raw="${1:-}"
+  local normalized=""
+  normalized="$(printf '%s' "${raw}" | tr '[:upper:]' '[:lower:]')"
+
+  case "${normalized}" in
+    "${OPENCLAW_STACK_LOG_SOURCE_READINESS}"|\
+    "${OPENCLAW_STACK_LOG_SOURCE_INSTALL}"|\
+    "${OPENCLAW_STACK_LOG_SOURCE_BOOTSTRAP}"|\
+    "${OPENCLAW_STACK_LOG_SOURCE_GATEWAY}")
+      printf '%s\n' "${normalized}"
+      return 0
+      ;;
+  esac
+
+  oc_stack_die "unsupported logs source '${raw}'. Supported sources: $(oc_stack_log_sources_csv)"
 }

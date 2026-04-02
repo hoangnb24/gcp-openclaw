@@ -32,6 +32,7 @@ DOWN_FORCE_NON_INTERACTIVE="false"
 INSTALL_PASSTHROUGH_ARGS=()
 DESTROY_PASSTHROUGH_ARGS=()
 SSH_PASSTHROUGH_ARGS=()
+LOG_SOURCE=""
 RESOLVED_STACK_ID=""
 RECOVERY_NOTE=""
 RECOVERY_CANDIDATES_CSV=""
@@ -50,6 +51,7 @@ Commands:
   up        Bring up one named stack through the existing install engine
   status    Show the current or explicit stack with GCP-backed anchor checks
   ssh       Open an IAP-backed shell on the verified stack instance
+  logs      Fetch named remote logs through the verified stack access path
   down      Tear down one stack through the existing destroy engine
   help      Show this help text
 
@@ -96,6 +98,14 @@ EOF
 Usage: $(basename "$0") ssh [--stack-id <id>] [--project-id <id>] [--region <region>] [--zone <zone>] [-- [ssh args]]
 
 Open an IAP-backed shell for a verified stack instance.
+EOF
+      ;;
+    logs)
+      cat <<EOF
+Usage: $(basename "$0") logs --source <name> [--stack-id <id>] [--project-id <id>] [--region <region>] [--zone <zone>]
+
+Fetch a named remote log stream through verified IAP-backed access.
+Supported sources: $(oc_stack_log_sources_csv)
 EOF
       ;;
     down)
@@ -359,6 +369,53 @@ parse_ssh_args() {
         ;;
     esac
   done
+}
+
+parse_logs_args() {
+  STACK_ID=""
+  PROJECT_ID=""
+  REGION=""
+  ZONE=""
+  LOG_SOURCE=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --stack-id)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --stack-id"
+        STACK_ID="$2"
+        shift 2
+        ;;
+      --project-id)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --project-id"
+        PROJECT_ID="$2"
+        shift 2
+        ;;
+      --region)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --region"
+        REGION="$2"
+        shift 2
+        ;;
+      --zone)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --zone"
+        ZONE="$2"
+        shift 2
+        ;;
+      --source)
+        [[ -n "${2-}" && "${2}" != --* ]] || die "missing value for --source"
+        LOG_SOURCE="$(oc_stack_require_log_source "$2")"
+        shift 2
+        ;;
+      -h|--help)
+        command_usage "${COMMAND}"
+        exit 0
+        ;;
+      *)
+        die "unknown option for ${COMMAND}: $1"
+        ;;
+    esac
+  done
+
+  [[ -n "${LOG_SOURCE}" ]] || die "logs requires --source <name>. Supported sources: $(oc_stack_log_sources_csv)"
 }
 
 resolve_project_context() {
@@ -1041,6 +1098,108 @@ EOF
   exec "${ssh_cmd[@]}"
 }
 
+logs_remote_script_for_source() {
+  local source_name="$1"
+
+  case "${source_name}" in
+    "${OPENCLAW_STACK_LOG_SOURCE_READINESS}")
+      cat <<'EOF'
+set -euo pipefail
+log_path="$HOME/.openclaw-gcp/install-logs/readiness-gate.log"
+if [[ ! -f "${log_path}" ]]; then
+  echo "logs source 'readiness' unavailable: missing ${log_path}" >&2
+  exit 1
+fi
+tail -n 200 "${log_path}"
+EOF
+      ;;
+    "${OPENCLAW_STACK_LOG_SOURCE_INSTALL}")
+      cat <<'EOF'
+set -euo pipefail
+log_path="$HOME/.openclaw-gcp/install-logs/latest.log"
+if [[ ! -f "${log_path}" ]]; then
+  echo "logs source 'install' unavailable: missing ${log_path}" >&2
+  exit 1
+fi
+tail -n 200 "${log_path}"
+EOF
+      ;;
+    "${OPENCLAW_STACK_LOG_SOURCE_BOOTSTRAP}")
+      cat <<'EOF'
+set -euo pipefail
+log_path="/var/log/openclaw/bootstrap.log"
+if [[ ! -f "${log_path}" ]]; then
+  echo "logs source 'bootstrap' unavailable: missing ${log_path}" >&2
+  exit 1
+fi
+tail -n 200 "${log_path}"
+EOF
+      ;;
+    "${OPENCLAW_STACK_LOG_SOURCE_GATEWAY}")
+      cat <<'EOF'
+set -euo pipefail
+container_name="openclaw_openclaw-gateway_1"
+if ! command -v docker >/dev/null 2>&1; then
+  echo "logs source 'gateway' unavailable: docker CLI is missing on remote host" >&2
+  exit 1
+fi
+if ! docker ps --format '{{.Names}}' | grep -Fxq "${container_name}"; then
+  echo "logs source 'gateway' unavailable: container ${container_name} is not running" >&2
+  exit 1
+fi
+docker logs --tail 200 "${container_name}"
+EOF
+      ;;
+    *)
+      die "unsupported logs source '${source_name}'. Supported sources: $(oc_stack_log_sources_csv)"
+      ;;
+  esac
+}
+
+run_logs() {
+  local resolved_project resolved_region resolved_zone
+  local instance_name remembered_stack_id remote_script
+  local -a logs_cmd
+
+  parse_logs_args "$@"
+  resolved_project="$(resolve_project_context)"
+  resolved_region="$(resolve_region_context)"
+  resolved_zone="$(resolve_zone_context "${resolved_region}")"
+
+  [[ -n "${resolved_project}" ]] || die "logs has insufficient context: no project resolved. Pass --project-id or run 'up' once so LAST_PROJECT_ID is recorded in $(oc_stack_state_file)."
+  command_exists gcloud || die "logs requires gcloud in PATH."
+
+  remembered_stack_id="$(oc_stack_state_get_or_empty CURRENT_STACK_ID)"
+  resolve_stack_id_for_status "${STACK_ID}" "${remembered_stack_id}" "${resolved_project}"
+  STACK_ID="${RESOLVED_STACK_ID}"
+
+  instance_name="$(oc_stack_instance_name "${STACK_ID}")"
+  verify_stack_remote_access_or_die "${STACK_ID}" "${resolved_project}" "${resolved_region}" "${resolved_zone}"
+  remote_script="$(logs_remote_script_for_source "${LOG_SOURCE}")"
+
+  logs_cmd=(
+    gcloud compute ssh "${instance_name}"
+    --project "${resolved_project}"
+    --zone "${resolved_zone}"
+    --tunnel-through-iap
+    --command "bash -lc $(printf '%q' "${remote_script}")"
+  )
+
+  cat <<EOF
+[logs] Stack anchors verified through GCP labels.
+Fetching '${LOG_SOURCE}' logs over IAP-backed SSH for stack '${STACK_ID}'.
+
+selection_source=${SELECTION_SOURCE}
+project_id=${resolved_project}
+region=${resolved_region}
+zone=${resolved_zone}
+instance_name=${instance_name}
+source=${LOG_SOURCE}
+EOF
+
+  exec "${logs_cmd[@]}"
+}
+
 COMMAND="${1:-help}"
 if [[ $# -gt 0 ]]; then
   shift
@@ -1058,6 +1217,9 @@ case "${COMMAND}" in
     ;;
   ssh)
     run_ssh "$@"
+    ;;
+  logs)
+    run_logs "$@"
     ;;
   down)
     run_down "$@"
