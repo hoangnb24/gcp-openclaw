@@ -1,6 +1,6 @@
 # Backup And Restore Runbook
 
-Primary provisioning/onboarding flow lives in `bash scripts/openclaw-gcp/install.sh`. This document covers day-2 data protection and recovery workflows after the VM is in service.
+Primary provisioning flow is `./bin/openclaw-gcp up --stack-id <stack-id>`, with `scripts/openclaw-gcp/install.sh` as the lower-level engine underneath it. This document covers day-2 data protection and recovery workflows after the VM is in service.
 
 This repository uses two complementary protection layers for persistent OpenClaw instances on GCP:
 
@@ -9,6 +9,13 @@ This repository uses two complementary protection layers for persistent OpenClaw
 
 Use recurring snapshots for routine recovery points.
 Use machine images before upgrades, risky maintenance, or when you want a long-lived full-environment clone source.
+
+If you follow the stack wrapper defaults, a stack ID such as `team-dev` maps to:
+
+- instance: `oc-team-dev`
+- template: `oc-team-dev-template`
+- router: `oc-team-dev-router`
+- NAT: `oc-team-dev-nat`
 
 ## Snapshot Schedule
 
@@ -147,6 +154,31 @@ Security notes:
 
 - do not assume provider credentials inherited from a machine image are appropriate for the new instance
 - re-auth or reinject credentials intentionally after clone creation
+
+## Exact-Name Cleanup Through The Wrapper
+
+Stack teardown stays centered on `./bin/openclaw-gcp down`, and the wrapper can pass exact-name cleanup extras through to the destroy engine when you want to remove related snapshot, clone, or machine-image artifacts in the same run.
+
+Example dry run:
+
+```bash
+./bin/openclaw-gcp down \
+  --stack-id my-stack \
+  --snapshot-policy-name oc-daily-snapshots \
+  --snapshot-policy-disk oc-my-stack \
+  --clone-instance-name oc-my-stack-recovery \
+  --machine-image-name oc-my-stack-pre-upgrade-YYYYMMDD-HHMM \
+  --dry-run
+```
+
+Supported exact-name cleanup extras:
+
+- `--snapshot-policy-name`
+- `--snapshot-policy-disk`
+- `--snapshot-policy-disk-zone`
+- `--clone-instance-name`
+- `--clone-zone`
+- `--machine-image-name`
 
 ## Restore From Snapshot
 

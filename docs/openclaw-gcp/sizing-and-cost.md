@@ -1,7 +1,7 @@
 # Sizing And Cost Baselines
 
 This note captures the operating baseline for OpenClaw on GCP and the size-up rules that match the repository defaults.
-Provisioning entrypoint for this baseline is `bash scripts/openclaw-gcp/install.sh`.
+Provisioning entrypoint for this baseline is `./bin/openclaw-gcp up --stack-id <stack-id>`, with `scripts/openclaw-gcp/install.sh` as the lower-level engine underneath it.
 
 Reference materials:
 
@@ -19,6 +19,7 @@ Reference materials:
 
 The repository scripts expose these defaults directly through:
 
+- `bin/openclaw-gcp`
 - `create-template.sh`
 - `create-instance.sh`
 - `create-cloud-nat.sh`
