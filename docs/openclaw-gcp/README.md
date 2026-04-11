@@ -1,6 +1,6 @@
 # OpenClaw On GCP Runbook
 
-This runbook documents the Phase 3 browser-first day-2 workflow and the thin wrapper that now sits in front of the existing GCP scripts.
+This runbook documents the Cloud Shell-first wrapper workflow and the lower-level GCP scripts that sit underneath it.
 
 ## Primary Quickstart
 
@@ -16,17 +16,17 @@ Inside Cloud Shell, the primary flow is:
 ./bin/openclaw-gcp down
 ```
 
-`welcome` is non-mutating.
-`up` is the real bring-up action.
+`welcome` prints the next `up` command and can chain directly into it when you confirm or pass `--yes`.
+`up` is the bring-up action.
 `status` explains both the remembered local stack context and the GCP-backed ownership anchors.
 `ssh` and `logs` use the same stack and anchor verification contract as `status`.
 `down` tears down the same stack contract without making you retype router/template/NAT names manually.
-Phase 1 expects an existing accessible GCP project and does not create new projects for you.
+This workflow expects an existing accessible GCP project and does not create new projects for you.
 Set one with `gcloud config set project <PROJECT_ID>` or pass `--project-id <PROJECT_ID>` to `up`.
 
 ## Cloud Shell Persistence And State
 
-Phase 1 stores a small convenience file at:
+The wrapper stores a small convenience file at:
 
 ```bash
 ~/.config/openclaw-gcp/current-stack.env
@@ -49,8 +49,8 @@ The durable ownership truth is the label set on the stack's instance/template an
 - `openclaw_tool=openclaw-gcp`
 - `openclaw_lifecycle=persistent`
 
-If local state disappears, becomes stale, or you use ephemeral Cloud Shell, `status` now attempts project-scoped label recovery first and repairs local state only when one candidate is trustworthy.
-`down` still stays conservative and verifies anchors before it will destroy anything.
+If local state disappears, becomes stale, or you use ephemeral Cloud Shell, `status` attempts project-scoped label recovery first and repairs local state only when one candidate is trustworthy.
+`down` verifies anchors before it will destroy anything.
 
 ## Stack Command Surface
 
@@ -66,10 +66,15 @@ Purpose:
 - point directly at the exact `up` command
 
 Behavior:
-- never provisions infrastructure by itself
-- can immediately chain into `up` if the operator confirms
+- prints the next `up` command before provisioning
+- can immediately chain into `up` if the operator confirms or passes `--yes`
 - reminds the operator that an existing GCP project is required
 - shows the current `gcloud` project when one is already set
+
+Options:
+- `--stack-id <id>`
+- `--yes`
+- `--non-interactive`
 
 ## `up`
 
@@ -82,6 +87,22 @@ Behavior:
 - derives the managed resource names automatically
 - writes the current-stack convenience state before delegating so partial bring-up is still recoverable by `status` and `down`
 - delegates real work to [`scripts/openclaw-gcp/install.sh`](../../scripts/openclaw-gcp/install.sh)
+
+Common options:
+- `--stack-id <id>`
+- `--project-id <id>`
+- `--region <region>`
+- `--zone <zone>`
+- `--lifecycle <name>`
+- `--openclaw-tag <tag>`
+- `--openclaw-image <image>`
+- `--service-account <email>`
+- `--scopes <csv>`
+- `--no-service-account`
+- `--allow-external-ip`
+- `--interactive`
+- `--non-interactive`
+- `--dry-run`
 
 Inherited safety/behavior from the existing install engine:
 - local prerequisite validation
@@ -118,14 +139,22 @@ Machine-readable mode is also available:
 ./bin/openclaw-gcp status --json
 ```
 
-`status --json` is additive and mirrors the human summary semantics.
-In addition to the existing top-level fields, it now includes:
+`status --json` is additive and mirrors the human summary semantics for successful status resolution.
+In addition to the existing top-level fields, it includes:
 
 - `context`: whether `gcloud` and project context were resolved, plus contextual note text
 - `state`: local convenience file values (`current_stack_id`, last project/region/zone, lifecycle, repaired flag)
 - `recovery`: recovery note plus recovered and partial candidate IDs
 
-This allows automation to reason about recovered, ambiguous, and insufficient-context outcomes directly.
+This allows automation to inspect resolved status results directly without relying on the human summary format.
+
+Options:
+- `--stack-id <id>`
+- `--project-id <id>`
+- `--region <region>`
+- `--zone <zone>`
+- `--lifecycle <name>`
+- `--json`
 
 ## `ssh`
 
@@ -146,6 +175,13 @@ Explicit stack selection is always available:
 ./bin/openclaw-gcp ssh --stack-id my-stack
 ```
 
+Options:
+- `--stack-id <id>`
+- `--project-id <id>`
+- `--region <region>`
+- `--zone <zone>`
+- SSH passthrough args after `--`
+
 ## `logs`
 
 ```bash
@@ -156,6 +192,7 @@ Behavior:
 - uses the same stack resolution and remote-access verification as `ssh`
 - stays on IAP-backed `gcloud compute ssh` path
 - supports only these named sources: `readiness`, `install`, `bootstrap`, `gateway`
+- returns the most recent 200 lines from the selected source
 - exits non-zero with explicit messaging for unsupported or unavailable sources
 
 Example sources:
@@ -165,6 +202,19 @@ Example sources:
 ./bin/openclaw-gcp logs --source bootstrap
 ./bin/openclaw-gcp logs --source gateway
 ```
+
+Source map:
+- `readiness`: `$HOME/.openclaw-gcp/install-logs/readiness-gate.log`
+- `install`: `$HOME/.openclaw-gcp/install-logs/latest.log`
+- `bootstrap`: `/var/log/openclaw/bootstrap.log`
+- `gateway`: `docker logs --tail 200 openclaw_openclaw-gateway_1`
+
+Options:
+- `--source <name>`
+- `--stack-id <id>`
+- `--project-id <id>`
+- `--region <region>`
+- `--zone <zone>`
 
 ## `down`
 
@@ -192,10 +242,30 @@ Non-interactive example:
 ./bin/openclaw-gcp down --stack-id my-stack --yes --non-interactive
 ```
 
-## What `down` Still Preserves
+Exact-name cleanup extras:
+- `--snapshot-policy-name <name>`
+- `--snapshot-policy-disk <name>`
+- `--snapshot-policy-disk-zone <zone>`
+- `--clone-instance-name <name>`
+- `--clone-zone <zone>`
+- `--machine-image-name <name>`
 
-The new wrapper does not weaken the old destroy contract.
-The underlying destroy engine still provides:
+Common options:
+- `--stack-id <id>`
+- `--project-id <id>`
+- `--region <region>`
+- `--zone <zone>`
+- `--lifecycle <name>`
+- `--network <name>`
+- `--dry-run`
+- `--yes`
+- `--interactive`
+- `--non-interactive`
+
+## What `down` Preserves
+
+The wrapper keeps the destroy contract narrow and explicit.
+The underlying destroy engine provides:
 
 - exact-name qualification
 - deterministic delete ordering
@@ -224,7 +294,7 @@ The lower-level scripts remain available:
 - `bash scripts/openclaw-gcp/create-template.sh`
 
 Use those when you intentionally want the lower-level contract.
-For normal Phase 1 operations, prefer `./bin/openclaw-gcp`.
+For normal operations, prefer `./bin/openclaw-gcp`.
 
 ## Troubleshooting
 

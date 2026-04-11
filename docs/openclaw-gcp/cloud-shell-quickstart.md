@@ -1,6 +1,6 @@
 # OpenClaw GCP Cloud Shell Quickstart
 
-This is the official Phase 1 browser-first landing flow.
+This is the Cloud Shell landing flow for the repo.
 It uses only documented Open in Cloud Shell parameters and does not rely on launch-time command execution.
 
 ## 1. Open This Repo In Cloud Shell
@@ -24,11 +24,11 @@ What this does not do:
 - it does not auto-run arbitrary repo commands
 - it does not auto-provision infrastructure
 
-For pre-merge branch UAT, replace `cloudshell_git_branch=main` with the branch under test.
-For example, this branch's UAT URL is:
+For branch-specific validation, replace `cloudshell_git_branch=main` with the branch under test.
+For example:
 
 ```text
-https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/hoangnb24/gcp-openclaw&cloudshell_git_branch=feature/openclaw-gcp-one-line-installer&cloudshell_workspace=.&cloudshell_tutorial=docs/openclaw-gcp/cloud-shell-quickstart.md&show=ide,terminal
+https://shell.cloud.google.com/cloudshell/editor?cloudshell_git_repo=https://github.com/hoangnb24/gcp-openclaw&cloudshell_git_branch=<branch-name>&cloudshell_workspace=.&cloudshell_tutorial=docs/openclaw-gcp/cloud-shell-quickstart.md&show=ide,terminal
 ```
 
 If you validate from an existing Cloud Shell terminal with `cloudshell_open`, use the equivalent command:
@@ -36,14 +36,14 @@ If you validate from an existing Cloud Shell terminal with `cloudshell_open`, us
 ```sh
 cloudshell_open \
   --repo_url "https://github.com/hoangnb24/gcp-openclaw" \
-  --git_branch "feature/openclaw-gcp-one-line-installer" \
+  --git_branch "<branch-name>" \
   --page "editor" \
   --tutorial "docs/openclaw-gcp/cloud-shell-quickstart.md" \
   --open_workspace "." \
   --force_new_clone
 ```
 
-## 2. Start The Non-Mutating Welcome Flow
+## 2. Start The Guided Welcome Flow
 
 Run:
 
@@ -57,9 +57,9 @@ The welcome flow:
 - reminds you that this flow expects an existing accessible GCP project
 - shows the current `gcloud` project when one is already set
 - explains the next `up` command
-- stays non-mutating until you explicitly choose to continue
+- can chain directly into `up` when you confirm or pass `--yes`
 
-Phase 1 does not create new GCP projects for you.
+This flow does not create new GCP projects for you.
 Before `up`, either set an existing project:
 
 ```sh
@@ -114,7 +114,7 @@ Machine-readable status is available when you need scripting-oriented output:
 ./bin/openclaw-gcp status --json
 ```
 
-`status --json` includes additive `context`, `state`, and `recovery` sections so automation can make decisions without parsing the human summary.
+`status --json` includes additive `context`, `state`, and `recovery` sections on successful status responses.
 
 ## 5. Day-2 Access And Logs
 
@@ -138,6 +138,7 @@ Supported `--source` values are exact and closed:
 - `gateway`
 
 The wrapper fails closed for unsupported sources, missing project context, missing instance anchors, or mismatched template anchors.
+Each source returns the most recent 200 lines from its mapped remote log surface.
 
 ## 6. Tear The Stack Down
 
